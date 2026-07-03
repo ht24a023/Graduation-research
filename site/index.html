@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>卒業研究 | 音声対話AIアシスタント</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Zen+Kaku+Gothic+New:wght@400;500;700;900&family=Yeseva+One&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="bg-noise" aria-hidden="true"></div>
+
+    <header class="hero reveal">
+      <p class="eyebrow">GRADUATION RESEARCH</p>
+      <h1>音声対話AIアシスタントの実装と統合</h1>
+      <p class="lead">
+        本研究は、音声入力から意図分類、外部機能呼び出し、応答生成までを
+        一貫して扱う日本語対話システムを、ローカル中心で構築したものです。
+      </p>
+      <div class="hero-actions">
+        <a class="cta" href="#overview">研究概要を見る</a>
+        <a class="cta ghost" href="#deliverables">成果物へ移動</a>
+      </div>
+    </header>
+
+    <main>
+      <section class="panel reveal" id="overview">
+        <h2>研究背景と目的</h2>
+        <p>
+          音声アシスタントは利便性が高い一方で、ネットワーク依存や応答遅延、
+          個人情報管理の課題があります。そこで本研究では、ローカル処理を優先しつつ、
+          必要時のみクラウドを補助利用するハイブリッド型対話基盤を設計・実装しました。
+        </p>
+      </section>
+
+      <section class="panel reveal">
+        <h2>システム構成</h2>
+        <div class="chips" role="list" aria-label="system architecture">
+          <span class="chip" role="listitem">音声入力 (ASR)</span>
+          <span class="chip" role="listitem">意図分類</span>
+          <span class="chip" role="listitem">関数ルーティング</span>
+          <span class="chip" role="listitem">ローカルLLM応答</span>
+          <span class="chip" role="listitem">クラウドAIフォールバック</span>
+          <span class="chip" role="listitem">ユーザーメモリ管理</span>
+        </div>
+      </section>
+
+      <section class="panel reveal">
+        <h2>主要実装機能</h2>
+        <ol>
+          <li>リアルタイム音声認識と部分文字起こし表示</li>
+          <li>時刻・曜日・計算・現在地・天気などの関数実行</li>
+          <li>Web検索・ナビ連携・MCPサーバー経由のツール提供</li>
+          <li>会話履歴とユーザープロファイルの継続的な反映</li>
+          <li>文書保存、一覧、編集、削除を含む自己PR支援機能</li>
+        </ol>
+      </section>
+
+      <section class="panel reveal" id="deliverables">
+        <h2>アウトプット・成果物</h2>
+        <p class="sub">
+          下記は本研究実装の主要ファイルです。GitHubにpushして公開すると、
+          ホスト端末を起動していない状態でもブラウザから閲覧できます。
+        </p>
+        <div class="result" aria-live="polite">
+          <ul class="links">
+            <li><a href="../main.py">音声対話エントリーポイント (main.py)</a></li>
+            <li><a href="../local_ai_server.py">ローカルWeb UIサーバー (local_ai_server.py)</a></li>
+            <li><a href="../mcp_server.py">MCPサーバー実装 (mcp_server.py)</a></li>
+            <li><a href="../models/user_profile_memory.py">ユーザーメモリ機能 (user_profile_memory.py)</a></li>
+          </ul>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <p>卒業研究テーマ: ローカル優先の日本語音声対話システム実装。</p>
+    </footer>
+
+    <script src="script.js"></script>
+  </body>
+</html>

@@ -1,0 +1,14 @@
+faster-whisper
+sounddevice
+scipy
+pyttsx3
+numpy
+
+python-dotenv
+openai
+torch
+torchaudio
+mcp>=1.8.0
+google-api-python-client
+google-auth
+google-auth-oauthlib
