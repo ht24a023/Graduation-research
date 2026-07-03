@@ -15,12 +15,10 @@
 ## GitHub で他者が閲覧できるようにする手順
 
 1. GitHub にリポジトリを push する
-2. リポジトリの Settings > Pages を開く
-3. Source を `Deploy from a branch` にする
-4. Branch を `main`、フォルダを `/(root)` に設定して Save
-5. 公開URLが有効になったら、`https://<ユーザー名>.github.io/<リポジトリ名>/site/` にアクセスする
+2. `.github/workflows/deploy-site.yml` が実行される（Actions タブで進行確認可）
+3. 公開URLが有効になったら、`https://ht24a023.github.io/Graduation-research/` にアクセスする
 
-この設定にすると `site` 配下のページだけでなく、`main.py` などリポジトリ直下の成果物ファイルへのリンクも有効になり、
+成果物リンクは GitHub 上のファイルURLを参照するため、
 あなたのPCでローカルサーバーを起動していなくても他者がブラウザから閲覧できます。
 
 ## 掲載している主な内容
