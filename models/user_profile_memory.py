@@ -1,3 +1,5 @@
+"""ユーザープロフィール・保存文書・記憶データを扱うモデルで、会話の継続性と文書管理を支えます。"""
+
 from __future__ import annotations
 
 import json
@@ -1322,6 +1324,211 @@ def save_keep_requests(keep_requests_data: dict[str, Any]) -> None:
         with open(_KEEP_REQUESTS_PATH, "w", encoding="utf-8") as f:
             json.dump(keep_requests_data, f, ensure_ascii=False, indent=2)
         _sync_view_file()
+
+
+def _extract_legacy_document_title(source_text: str, content: str) -> str:
+    source = (source_text or "").strip()
+    if source:
+        m = re.search(r"(.+?)を(?:保存しておいてほしい|保存してほしい|保存しておいて|保存しといてほしい|保存しといて|保存して|覚えておいて)", source)
+        if m:
+            candidate = (m.group(1) or "").strip(" 。、'\"")
+            if candidate:
+                return candidate
+
+    first_line = (content or "").strip().splitlines()[0] if (content or "").strip() else ""
+    first_line = first_line.strip(" 。、'\"")
+    return first_line[:80] if first_line else "無題"
+
+
+def _looks_like_legacy_document_note(item: dict[str, Any]) -> bool:
+    if not isinstance(item, dict):
+        return False
+
+    item_type = (item.get("type") or "").strip()
+    if item_type == "document":
+        return False
+
+    content = (item.get("content") or "").strip()
+    source = (item.get("source") or "").strip()
+    if not content:
+        return False
+
+    if len(content) >= _LONG_TEXT_TO_DOC_THRESHOLD:
+        return True
+
+    document_keywords = ("自己PR", "ＥＳ", "ES", "ガクチカ", "志望動機", "文書", "文章")
+    save_keywords = ("保存して", "保存しといて", "覚えておいて", "記録して")
+    return any(k in source for k in document_keywords) and any(k in source for k in save_keywords)
+
+
+def _migrate_legacy_document_like_notes() -> int:
+    data = load_keep_requests()
+    items = data.get("items", []) if isinstance(data.get("items"), list) else []
+    if not items:
+        return 0
+
+    existing_docs = [it for it in items if isinstance(it, dict) and (it.get("type") or "") == "document"]
+    checksum_to_doc: dict[str, dict[str, Any]] = {}
+    for doc in existing_docs:
+        checksum = (doc.get("checksum") or "").strip()
+        if checksum:
+            checksum_to_doc[checksum] = doc
+
+    migrated = 0
+    for item in items:
+        if not _looks_like_legacy_document_note(item):
+            continue
+
+        content = (item.get("content") or "").strip()
+        source = (item.get("source") or "").strip()
+        title = _extract_legacy_document_title(source, content)
+        checksum = _document_checksum(title, content)
+
+        existing = checksum_to_doc.get(checksum)
+        if existing:
+            item["type"] = "document"
+            item["doc_id"] = (existing.get("doc_id") or "").strip()
+            item["title"] = (existing.get("title") or title).strip()
+            item["file_path"] = (existing.get("file_path") or "").strip()
+            item["chars"] = int(existing.get("chars") or len(content) or 0)
+            item["checksum"] = checksum
+            item["preview"] = _truncate(content.replace("\n", " "), 120)
+            item["saved_at"] = (existing.get("saved_at") or item.get("saved_at") or _now_iso())
+            item.pop("content", None)
+            migrated += 1
+            continue
+
+        saved_at = (item.get("saved_at") or "").strip() or _now_iso()
+        doc_id = _next_document_id()
+        abs_file_path = _write_document_text_file(doc_id, title, content, checksum, saved_at)
+        rel_file_path = abs_file_path.replace("\\", "/")
+
+        _append_document_db_row(
+            doc_id=doc_id,
+            created_at=saved_at,
+            updated_at=saved_at,
+            status="active",
+            title=title,
+            file_path=rel_file_path,
+            char_count=len(content),
+            checksum=checksum,
+        )
+
+        item["type"] = "document"
+        item["doc_id"] = doc_id
+        item["title"] = title
+        item["file_path"] = rel_file_path
+        item["chars"] = len(content)
+        item["checksum"] = checksum
+        item["preview"] = _truncate(content.replace("\n", " "), 120)
+        item["saved_at"] = saved_at
+        item.pop("content", None)
+
+        checksum_to_doc[checksum] = item
+        migrated += 1
+
+    if migrated > 0:
+        data["items"] = items
+        save_keep_requests(data)
+
+    return migrated
+
+
+def ensure_memory_stores() -> dict[str, Any]:
+    """Initialize and self-heal local memory stores and text DB index."""
+    with _LOCK:
+        _ensure_profile_file()
+        _ensure_notes_file()
+        _ensure_keep_requests_file()
+        _ensure_text_documents_store()
+        _ensure_document_session_file()
+        _sync_view_file()
+
+        # Migrate old long/self-PR notes into document records first.
+        migrated_legacy_notes = _migrate_legacy_document_like_notes()
+
+        # If document entries exist but DB index is missing/incomplete, backfill rows.
+        rows = _iter_documents_db_rows()
+        indexed_ids = {(cols[0] or "").strip() for cols in rows if len(cols) >= 8}
+
+        keep_data = load_keep_requests()
+        items = keep_data.get("items", []) if isinstance(keep_data.get("items"), list) else []
+        repaired = 0
+
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            if (item.get("type") or "") != "document":
+                continue
+
+            doc_id = (item.get("doc_id") or "").strip()
+            file_path = (item.get("file_path") or "").strip()
+            title = (item.get("title") or "").strip() or "無題"
+            if not doc_id or not file_path:
+                continue
+            if doc_id in indexed_ids:
+                continue
+            if not os.path.exists(file_path):
+                continue
+
+            content = _resolve_document_content(item)
+            checksum = (item.get("checksum") or "").strip() or _document_checksum(title, content)
+            saved_at = (item.get("saved_at") or "").strip() or _now_iso()
+            updated_at = (item.get("updated_at") or "").strip() or saved_at
+            chars = int(item.get("chars") or len(content) or 0)
+
+            _append_document_db_row(
+                doc_id=doc_id,
+                created_at=saved_at,
+                updated_at=updated_at,
+                status="active",
+                title=title,
+                file_path=file_path,
+                char_count=chars,
+                checksum=checksum,
+            )
+            indexed_ids.add(doc_id)
+            repaired += 1
+
+        status = get_storage_status()
+        status["migrated_legacy_notes"] = migrated_legacy_notes
+        status["db_repaired_rows"] = repaired
+        return status
+
+
+def get_storage_status() -> dict[str, Any]:
+    """Return current storage/db paths and health summary."""
+    with _LOCK:
+        rows = _iter_documents_db_rows()
+        keep_data = load_keep_requests()
+        keep_items = keep_data.get("items", []) if isinstance(keep_data.get("items"), list) else []
+        document_items = [it for it in keep_items if isinstance(it, dict) and (it.get("type") or "") == "document"]
+
+        return {
+            "ok": True,
+            "paths": {
+                "profile": _PROFILE_PATH,
+                "notes": _NOTES_PATH,
+                "keep_requests": _KEEP_REQUESTS_PATH,
+                "view": _VIEW_PATH,
+                "documents_dir": _TEXT_DOCS_DIR,
+                "documents_db": _TEXT_DOCS_DB_PATH,
+                "document_session": _DOC_SESSION_PATH,
+            },
+            "exists": {
+                "profile": os.path.exists(_PROFILE_PATH),
+                "notes": os.path.exists(_NOTES_PATH),
+                "keep_requests": os.path.exists(_KEEP_REQUESTS_PATH),
+                "view": os.path.exists(_VIEW_PATH),
+                "documents_dir": os.path.isdir(_TEXT_DOCS_DIR),
+                "documents_db": os.path.exists(_TEXT_DOCS_DB_PATH),
+                "document_session": os.path.exists(_DOC_SESSION_PATH),
+            },
+            "counts": {
+                "documents_db_rows": len(rows),
+                "document_items": len(document_items),
+            },
+        }
 
 
 def _dedupe_keep_order(items: list[str]) -> list[str]:

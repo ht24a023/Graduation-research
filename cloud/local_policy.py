@@ -1,3 +1,5 @@
+"""ローカル優先の応答方針を定める層で、どこまでをローカルで処理するかを制御します。"""
+
 from functions.time_func import get_time, get_weekday, get_weekday_from_text
 from functions.calculator import calculate
 from functions.location import get_current_location
@@ -102,7 +104,7 @@ def respond_local_only(text: str, conversation_history=None):
         return ask_local_llm(prompt)
 
     if _WEATHER_PATTERN.search(normalized):
-        return get_weather()
+        return get_weather(normalized)
 
     if _LOCATION_PATTERN.search(normalized):
         return get_current_location()

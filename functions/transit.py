@@ -1,3 +1,5 @@
+"""経路案内の目的地抽出とルート生成を行う関数群で、移動案内を支えます。"""
+
 """
 transit.py — APIキー不要の経路検索モジュール
 
@@ -29,6 +31,17 @@ _UA = (
 )
 
 
+def _build_google_maps_directions_url(origin: str, destination: str, travelmode: str | None = None) -> str:
+    params = {
+        "api": "1",
+        "origin": (origin or "").strip(),
+        "destination": (destination or "").strip(),
+    }
+    if travelmode:
+        params["travelmode"] = travelmode
+    return "https://www.google.com/maps/dir/?" + urlencode(params)
+
+
 # ─────────────────────────────────────────────
 # Nominatim: 住所 → (lat, lon)
 # ─────────────────────────────────────────────
@@ -56,17 +69,21 @@ def _label_from_location_details(details: dict | None) -> str:
     return " / ".join(parts) if parts else "現在地"
 
 
-def _resolve_origin(origin: str, current_location: str = "") -> tuple[str, tuple[float, float] | None]:
+def _resolve_origin(
+    origin: str,
+    current_location: str = "",
+    current_location_details: dict | None = None,
+) -> tuple[str, tuple[float, float] | None, dict | None]:
     normalized_origin = (origin or "").strip()
 
     if (not normalized_origin) or (normalized_origin in _HERE_WORDS):
-        details = get_location_details()
+        details = current_location_details if isinstance(current_location_details, dict) else get_location_details()
         label = (current_location or "").strip() or _label_from_location_details(details)
         if details and details.get("latitude") is not None and details.get("longitude") is not None:
-            return label, (float(details["latitude"]), float(details["longitude"]))
-        return label, None
+            return label, (float(details["latitude"]), float(details["longitude"])), details
+        return label, None, details
 
-    return normalized_origin, _geocode(normalized_origin)
+    return normalized_origin, _geocode(normalized_origin), None
 
 
 # ─────────────────────────────────────────────
@@ -219,9 +236,7 @@ def _yahoo_transit_scrape(origin: str, destination: str) -> str:
         lines.append(f"路線: {' / '.join(unique_lines)}")
 
     # Google Mapsリンク
-    lines.append(
-        f"\nGoogle Maps: https://www.google.com/maps/dir/{quote(origin)}/{quote(destination)}"
-    )
+    lines.append(f"\nGoogle Mapsリンク:\n{_build_google_maps_directions_url(origin, destination, travelmode='transit')}")
     return "\n".join(lines)
 
 
@@ -316,7 +331,7 @@ def navigate(origin: str, destination: str, mode: str = "driving") -> str:
         profile = "foot" if mode == "walking" else "driving"
         result = _osrm_route(orig_coord, dest_coord, profile=profile)
         if not result.startswith("（"):
-            result += f"\n\nGoogle Maps: https://www.google.com/maps/dir/{quote(origin)}/{quote(destination)}"
+            result += f"\n\nGoogle Maps: {_build_google_maps_directions_url(origin, destination, travelmode=mode)}"
             return result
 
     # フォールバック: Google Maps API（キーがある場合）
@@ -325,8 +340,8 @@ def navigate(origin: str, destination: str, mode: str = "driving") -> str:
         return get_google_maps_directions(origin, destination, mode=mode)
 
     # 最終フォールバック: Google Maps URLのみ返す
-    maps_url = f"https://www.google.com/maps/dir/{quote(origin)}/{quote(destination)}"
-    return f"{origin} → {destination} の経路:\nGoogle Maps で確認: {maps_url}"
+    maps_url = _build_google_maps_directions_url(origin, destination, travelmode=mode)
+    return f"{origin} → {destination} の経路:\nGoogle Mapsリンク:\n{maps_url}"
 
 
 def search_transit(origin: str, destination: str) -> str:
@@ -351,11 +366,15 @@ def search_transit(origin: str, destination: str) -> str:
 
     # 最終フォールバック: 徒歩経路 + Google Maps URL
     walk = navigate(origin, destination, mode="walking")
-    maps_url = f"https://www.google.com/maps/dir/{quote(origin)}/{quote(destination)}"
+    maps_url = _build_google_maps_directions_url(origin, destination, travelmode="transit")
     return f"{walk}\n\n電車ルートの詳細はこちら:\n{maps_url}"
 
 
-def resolve_navigation(text: str, current_location: str = "") -> str:
+def resolve_navigation(
+    text: str,
+    current_location: str = "",
+    current_location_details: dict | None = None,
+) -> str:
     """
     自然文からナビ/乗換案内を解決する。
     「〜から〜まで電車で」「〜への行き方」などを解析してルート検索する。
@@ -367,7 +386,11 @@ def resolve_navigation(text: str, current_location: str = "") -> str:
     if not destination:
         destination = _extract_destination(normalized)
 
-    origin_label, origin_coord = _resolve_origin(origin_raw, current_location=current_location)
+    origin_label, origin_coord, origin_details = _resolve_origin(
+        origin_raw,
+        current_location=current_location,
+        current_location_details=current_location_details,
+    )
 
     transit_keywords = ["電車", "乗換", "乗り換え", "路線", "地下鉄", "バス", "公共交通", "電車で", "バスで"]
     walking_keywords = ["歩い", "徒歩", "歩いて"]
@@ -381,6 +404,15 @@ def resolve_navigation(text: str, current_location: str = "") -> str:
     # デフォルト: 車 + 公共交通 + 徒歩(30分以内のみ) をまとめて返す
     dest_coord = _geocode(destination)
     lines = [f"{origin_label} → {destination} の目安です。"]
+    if origin_details and ((not origin_raw) or ((origin_raw or "").strip() in _HERE_WORDS)):
+        provider = origin_details.get("provider") or "unknown"
+        lat = origin_details.get("latitude")
+        lon = origin_details.get("longitude")
+        if lat is not None and lon is not None:
+            lines.append(f"出発地推定: IPベースの概算（provider: {provider}, 緯度{lat}, 経度{lon}）")
+        else:
+            lines.append(f"出発地推定: IPベースの概算（provider: {provider}）")
+        lines.append("地点が異なる場合は『新宿駅から京都駅まで』のように出発地を明示してください。")
 
     if origin_coord and dest_coord:
         car = _osrm_route_data(origin_coord, dest_coord, profile="driving")
@@ -399,7 +431,7 @@ def resolve_navigation(text: str, current_location: str = "") -> str:
         lines.append("車: 取得できませんでした。")
         lines.append(_yahoo_transit_summary(origin_label, destination))
 
-    maps_url = f"https://www.google.com/maps/dir/{quote(origin_label)}/{quote(destination)}"
-    lines.append(f"Google Maps: {maps_url}")
+    maps_url = _build_google_maps_directions_url(origin_label, destination)
+    lines.append(f"Google Mapsリンク:\n{maps_url}")
 
     return "\n".join(lines)

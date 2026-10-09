@@ -1,3 +1,5 @@
+"""アプリ全体の接続先・モデル名・実行設定をまとめる設定ファイルで、各モジュールの動作条件を統一します。"""
+
 from dotenv import load_dotenv
 import os
 
@@ -21,5 +23,5 @@ OLLAMA_TIMEOUT = float(os.getenv("OLLAMA_TIMEOUT", "60"))
 LOCAL_LLM_CONF_THRESHOLD = 0.55  # >= -> use local LLM
 CLOUD_CONF_THRESHOLD = 0.35      # < -> use cloud LLM
 
-# Toggle text-only mode (set TTS_ENABLED=true to enable voice)
+# テキスト専用運用では未使用だが、過去設定との互換性のため残している音声フラグ
 TTS_ENABLED = os.getenv("TTS_ENABLED", "false").lower() == "true"

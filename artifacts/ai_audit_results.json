@@ -1,0 +1,743 @@
+[
+  {
+    "id": "A",
+    "session_id": "audit-a-a3fa5c1ca42748c9a3c714f41b011e61",
+    "input": "Edge AIについて英語の情報を検索して",
+    "followup_input": null,
+    "intent": "search",
+    "route": "local_search",
+    "post_body": {
+      "message": "Edge AIについて英語の情報を検索して",
+      "session_id": "audit-a-a3fa5c1ca42748c9a3c714f41b011e61"
+    },
+    "response_json": {
+      "ok": true,
+      "attempt": 1,
+      "fallback_used": false,
+      "session_id": "audit-a-a3fa5c1ca42748c9a3c714f41b011e61",
+      "experiment_mode": "DYNAMIC_ROUTING",
+      "test_case_id": "",
+      "route": "local_search",
+      "response": "【route: local_search】\n要約：Microsoft Edge のAI搭載機能を探る / EdgeのAI機能「Bingチャット」が進化、自分で読まなくても英文PDFの内容が分かるぞ!【イニシャルB】 / AI を搭載した新たな Microsoft Bing と Edge が検索を再発明 ― ウェブの副操縦士\n参考情報：\n1. Microsoft Edge のAI搭載機能を探る\n   //duckduckgo.com/l/?uddg=https%3A%2F%2Fexplore.microsoft.com%2Fja%2Djp%2Fedge%2Ffeatures%2Fai&rut=fde92ccab6bf24e6e8f712d8bb075801c5bc2eea7d8c6f46d7a39b2124966e9e\n2. EdgeのAI機能「Bingチャット」が進化、自分で読まなくても英文PDFの内容が分かるぞ!【イニシャルB】\n   //duckduckgo.com/l/?uddg=https%3A%2F%2Finternet.watch.impress.co.jp%2Fdocs%2Fcolumn%2Fshimizu%2F1515590.html&rut=f6bc0c2e3c0aaec18ef02abe576013bb9c949f13e214152af37abaf05f0485c2\n3. AI を搭載した新たな Microsoft Bing と Edge が検索を再発明 ― ウェブの副操縦士\n   //duckduckgo.com/l/?uddg=https%3A%2F%2Fnews.microsoft.com%2Fja%2Djp%2F2023%2F02%2F08%2F230208%2Dreinventing%2Dsearch%2Dwith%2Da%2Dnew%2Dai%2Dpowered%2Dmicrosoft%2Dbing%2Dand%2Dedge%2Dyour%2Dcopilot%2Dfor%2Dthe%2Dweb%2F&rut=0b105fa54419fe35fd75e6ce09e9f7b32b0215daaeadba2aa66a4052ee9b0a13\n4. Copilot搭載の「Edge」が情報収集を効率化、検索から対話へ - 生成AIで自分生産性向上：日経クロステック Active\n   //duckduckgo.com/l/?uddg=https%3A%2F%2Factive.nikkeibp.co.jp%2Fatcl%2Fact%2F19%2F00730%2F060100015%2F&rut=35649f07d6e7cada4251d9749d13e6fbfe83f4321e9273c50b81faf9fdcf14ed\n5. 「Chrome」「Edge」「Firefox」のAI機能を比べてみた - ZDNET Japan\n   //duckduckgo.com/l/?uddg=https%3A%2F%2Fjapan.zdnet.com%2Farticle%2F35249762%2F&rut=ced5fcbf2cfe7533681f6c227620d9e4ae44c4b5b52c8d30a1348f721bf46077\n検索情報：\n検索エンジン：Google→DuckDuckGo\n検索語：Edge AIについて英語の情報を検索して\n取得日時：2026-08-26T04:13:55.473359+00:00\n確認方法：検索スニペットだけ",
+      "evaluation": {
+        "request_id": "e3bacfac4ca44d33ae55c14e33922ea7",
+        "experiment_mode": "DYNAMIC_ROUTING",
+        "test_case_id": "",
+        "route": "ローカル処理",
+        "response_time_sec": 1.748,
+        "local_time_sec": 1.746,
+        "cloud_time_sec": 0.0,
+        "api_called": false,
+        "cloud_api_call": "なし",
+        "estimated_api_reduction_count": 1,
+        "input_tokens": 6,
+        "output_tokens": 376,
+        "estimated_api_cost_yen": 0.0,
+        "estimated_cloud_baseline_cost_yen": 0.0755,
+        "saved_cost_yen": 0.0755,
+        "api_reduction_rate": 91.07,
+        "cloud_api_call_reduction_rate": 91.07,
+        "estimated_token_reduction_rate": 97.9,
+        "estimated_cost_reduction_rate": 99.45,
+        "user_rating": "",
+        "quality_passed": false
+      }
+    },
+    "followup_post_body": {},
+    "followup_response_json": {},
+    "followup_final_answer": null,
+    "ui_text_full": {
+      "user_bubble": "Edge AIについて英語の情報を検索して",
+      "assistant_bubble": "【route: local_search】\n要約：Microsoft Edge のAI搭載機能を探る / EdgeのAI機能「Bingチャット」が進化、自分で読まなくても英文PDFの内容が分かるぞ!【イニシャルB】 / AI を搭載した新たな Microsoft Bing と Edge が検索を再発明 ― ウェブの副操縦士\n参考情報：\n1. Microsoft Edge のAI搭載機能を探る\n   //duckduckgo.com/l/?uddg=https%3A%2F%2Fexplore.microsoft.com%2Fja%2Djp%2Fedge%2Ffeatures%2Fai&rut=fde92ccab6bf24e6e8f712d8bb075801c5bc2eea7d8c6f46d7a39b2124966e9e\n2. EdgeのAI機能「Bingチャット」が進化、自分で読まなくても英文PDFの内容が分かるぞ!【イニシャルB】\n   //duckduckgo.com/l/?uddg=https%3A%2F%2Finternet.watch.impress.co.jp%2Fdocs%2Fcolumn%2Fshimizu%2F1515590.html&rut=f6bc0c2e3c0aaec18ef02abe576013bb9c949f13e214152af37abaf05f0485c2\n3. AI を搭載した新たな Microsoft Bing と Edge が検索を再発明 ― ウェブの副操縦士\n   //duckduckgo.com/l/?uddg=https%3A%2F%2Fnews.microsoft.com%2Fja%2Djp%2F2023%2F02%2F08%2F230208%2Dreinventing%2Dsearch%2Dwith%2Da%2Dnew%2Dai%2Dpowered%2Dmicrosoft%2Dbing%2Dand%2Dedge%2Dyour%2Dcopilot%2Dfor%2Dthe%2Dweb%2F&rut=0b105fa54419fe35fd75e6ce09e9f7b32b0215daaeadba2aa66a4052ee9b0a13\n4. Copilot搭載の「Edge」が情報収集を効率化、検索から対話へ - 生成AIで自分生産性向上：日経クロステック Active\n   //duckduckgo.com/l/?uddg=https%3A%2F%2Factive.nikkeibp.co.jp%2Fatcl%2Fact%2F19%2F00730%2F060100015%2F&rut=35649f07d6e7cada4251d9749d13e6fbfe83f4321e9273c50b81faf9fdcf14ed\n5. 「Chrome」「Edge」「Firefox」のAI機能を比べてみた - ZDNET Japan\n   //duckduckgo.com/l/?uddg=https%3A%2F%2Fjapan.zdnet.com%2Farticle%2F35249762%2F&rut=ced5fcbf2cfe7533681f6c227620d9e4ae44c4b5b52c8d30a1348f721bf46077\n検索情報：\n検索エンジン：Google→DuckDuckGo\n検索語：Edge AIについて英語の情報を検索して\n取得日時：2026-08-26T04:13:55.473359+00:00\n確認方法：検索スニペットだけ",
+      "panel_text": "",
+      "followup_assistant_bubble": "",
+      "followup_panel_text": ""
+    },
+    "prompt_input": false,
+    "has_reference_links": false,
+    "timed_out": false,
+    "output_order": {
+      "has_translation_heading": false,
+      "has_summary_heading": false,
+      "has_links_heading": false,
+      "first_5_lines": [
+        "【route: local_search】",
+        "要約：Microsoft Edge のAI搭載機能を探る / EdgeのAI機能「Bingチャット」が進化、自分で読まなくても英文PDFの内容が分かるぞ!【イニシャルB】 / AI を搭載した新たな Microsoft Bing と Edge が検索を再発明 ― ウェブの副操縦士",
+        "参考情報：",
+        "1. Microsoft Edge のAI搭載機能を探る",
+        "   //duckduckgo.com/l/?uddg=https%3A%2F%2Fexplore.microsoft.com%2Fja%2Djp%2Fedge%2Ffeatures%2Fai&rut=fde92ccab6bf24e6e8f712d8bb075801c5bc2eea7d8c6f46d7a39b2124966e9e"
+      ]
+    }
+  },
+  {
+    "id": "B",
+    "session_id": "audit-b-36485108f0c841bd83e122e47420f242",
+    "input": "What is edge AI? Please search the web and summarize the results.",
+    "followup_input": null,
+    "intent": "search",
+    "route": "local_search",
+    "post_body": {
+      "message": "What is edge AI? Please search the web and summarize the results.",
+      "session_id": "audit-b-36485108f0c841bd83e122e47420f242"
+    },
+    "response_json": {
+      "ok": true,
+      "attempt": 1,
+      "fallback_used": false,
+      "session_id": "audit-b-36485108f0c841bd83e122e47420f242",
+      "experiment_mode": "DYNAMIC_ROUTING",
+      "test_case_id": "",
+      "route": "local_search",
+      "response": "【route: local_search】\n日本語訳：What is edge AI? Please search the web and summarize the results.\n要約：Explore AI-powered features in Microsoft Edge / AI Innovations with Microsoft Edge - Smarter Browsing with Built-in AI ... / Microsoft Edge Adds AI Search and Summaries - Everyday Teching\n参考情報：\n1. Explore AI-powered features in Microsoft Edge\n   //duckduckgo.com/l/?uddg=https%3A%2F%2Fexplore.microsoft.com%2Fen%2Dus%2Fedge%2Ffeatures%2Fai&rut=2ff6c24ccbf94e8b638fb00711712a6018e05cbb0cc4ebba16cf4b80de3d103f\n2. AI Innovations with Microsoft Edge - Smarter Browsing with Built-in AI ...\n   //duckduckgo.com/l/?uddg=https%3A%2F%2Fdir.md%2Fsupport.microsoft.com%2Fen%2Dus%2Fedge%2Fai%2Dinnovations%2Dwith%2Dedge.html&rut=80f249dd0e9c1a5449e7baee9e1fcd88efd9f5f1eec49a4ea397e79a1ab6aaae\n3. Microsoft Edge Adds AI Search and Summaries - Everyday Teching\n   //duckduckgo.com/l/?uddg=https%3A%2F%2Feverydayteching.io%2Fmicrosoft%2Dedge%2Drevolutionizes%2Dbrowsing%2Dwith%2Dai%2Dpowered%2Dsearch%2Dand%2Dsummaries%2F&rut=c21c54002fd7ad5721a900add25f138811ea0653712ad1b06bdea5a5856c106d\n4. How to use AI features in Edge browser - The Windows Club\n   //duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.thewindowsclub.com%2Fhow%2Dto%2Duse%2Dai%2Dfeatures%2Din%2Dedge%2Dbrowser&rut=38f33cd3e132006ea529ed8141e91d666cfaa6913db7ed029325436f32209d81\n5. Getting started with Copilot in Microsoft Edge\n   //duckduckgo.com/l/?uddg=https%3A%2F%2Fsupport.microsoft.com%2Fen%2Dus%2Fmicrosoft%2Dcopilot%2Fgetting%2Dstarted%2Dwith%2Dcopilot%2Din%2Dmicrosoft%2Dedge&rut=48f79d81c0157d56124c0f4073eee4fff2a1bba3318db8a15864bd1fcaf5dd42\n検索情報：\n検索エンジン：Google→DuckDuckGo\n検索語：What is edge AI? Please search the web and summarize the results.\n取得日時：2026-08-26T04:13:57.870527+00:00\n確認方法：検索スニペットだけ",
+      "evaluation": {
+        "request_id": "31b09131b6e74d17a0d619a876cbf451",
+        "experiment_mode": "DYNAMIC_ROUTING",
+        "test_case_id": "",
+        "route": "ローカル処理",
+        "response_time_sec": 2.19,
+        "local_time_sec": 2.184,
+        "cloud_time_sec": 0.0,
+        "api_called": false,
+        "cloud_api_call": "なし",
+        "estimated_api_reduction_count": 1,
+        "input_tokens": 17,
+        "output_tokens": 439,
+        "estimated_api_cost_yen": 0.0,
+        "estimated_cloud_baseline_cost_yen": 0.08865,
+        "saved_cost_yen": 0.08865,
+        "api_reduction_rate": 91.08,
+        "cloud_api_call_reduction_rate": 91.08,
+        "estimated_token_reduction_rate": 97.92,
+        "estimated_cost_reduction_rate": 99.46,
+        "user_rating": "",
+        "quality_passed": false
+      }
+    },
+    "followup_post_body": {},
+    "followup_response_json": {},
+    "followup_final_answer": null,
+    "ui_text_full": {
+      "user_bubble": "What is edge AI? Please search the web and summarize the results.",
+      "assistant_bubble": "【route: local_search】\n日本語訳：What is edge AI? Please search the web and summarize the results.\n要約：Explore AI-powered features in Microsoft Edge / AI Innovations with Microsoft Edge - Smarter Browsing with Built-in AI ... / Microsoft Edge Adds AI Search and Summaries - Everyday Teching\n参考情報：\n1. Explore AI-powered features in Microsoft Edge\n   //duckduckgo.com/l/?uddg=https%3A%2F%2Fexplore.microsoft.com%2Fen%2Dus%2Fedge%2Ffeatures%2Fai&rut=2ff6c24ccbf94e8b638fb00711712a6018e05cbb0cc4ebba16cf4b80de3d103f\n2. AI Innovations with Microsoft Edge - Smarter Browsing with Built-in AI ...\n   //duckduckgo.com/l/?uddg=https%3A%2F%2Fdir.md%2Fsupport.microsoft.com%2Fen%2Dus%2Fedge%2Fai%2Dinnovations%2Dwith%2Dedge.html&rut=80f249dd0e9c1a5449e7baee9e1fcd88efd9f5f1eec49a4ea397e79a1ab6aaae\n3. Microsoft Edge Adds AI Search and Summaries - Everyday Teching\n   //duckduckgo.com/l/?uddg=https%3A%2F%2Feverydayteching.io%2Fmicrosoft%2Dedge%2Drevolutionizes%2Dbrowsing%2Dwith%2Dai%2Dpowered%2Dsearch%2Dand%2Dsummaries%2F&rut=c21c54002fd7ad5721a900add25f138811ea0653712ad1b06bdea5a5856c106d\n4. How to use AI features in Edge browser - The Windows Club\n   //duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.thewindowsclub.com%2Fhow%2Dto%2Duse%2Dai%2Dfeatures%2Din%2Dedge%2Dbrowser&rut=38f33cd3e132006ea529ed8141e91d666cfaa6913db7ed029325436f32209d81\n5. Getting started with Copilot in Microsoft Edge\n   //duckduckgo.com/l/?uddg=https%3A%2F%2Fsupport.microsoft.com%2Fen%2Dus%2Fmicrosoft%2Dcopilot%2Fgetting%2Dstarted%2Dwith%2Dcopilot%2Din%2Dmicrosoft%2Dedge&rut=48f79d81c0157d56124c0f4073eee4fff2a1bba3318db8a15864bd1fcaf5dd42\n検索情報：\n検索エンジン：Google→DuckDuckGo\n検索語：What is edge AI? Please search the web and summarize the results.\n取得日時：2026-08-26T04:13:57.870527+00:00\n確認方法：検索スニペットだけ",
+      "panel_text": "",
+      "followup_assistant_bubble": "",
+      "followup_panel_text": ""
+    },
+    "prompt_input": false,
+    "has_reference_links": false,
+    "timed_out": false,
+    "output_order": {
+      "has_translation_heading": true,
+      "has_summary_heading": false,
+      "has_links_heading": false,
+      "first_5_lines": [
+        "【route: local_search】",
+        "日本語訳：What is edge AI? Please search the web and summarize the results.",
+        "要約：Explore AI-powered features in Microsoft Edge / AI Innovations with Microsoft Edge - Smarter Browsing with Built-in AI ... / Microsoft Edge Adds AI Search and Summaries - Everyday Teching",
+        "参考情報：",
+        "1. Explore AI-powered features in Microsoft Edge"
+      ]
+    }
+  },
+  {
+    "id": "C",
+    "session_id": "audit-c-b9188599e9fc452f9de0750b515828a5",
+    "input": "什么是边缘人工智能？请搜索并用日语总结。",
+    "followup_input": null,
+    "intent": "search",
+    "route": "local_search",
+    "post_body": {
+      "message": "什么是边缘人工智能？请搜索并用日语总结。",
+      "session_id": "audit-c-b9188599e9fc452f9de0750b515828a5"
+    },
+    "response_json": {
+      "ok": true,
+      "attempt": 1,
+      "fallback_used": false,
+      "session_id": "audit-c-b9188599e9fc452f9de0750b515828a5",
+      "experiment_mode": "DYNAMIC_ROUTING",
+      "test_case_id": "",
+      "route": "local_search",
+      "response": "【route: local_search】\n検索結果を取得できませんでした。\n診断: Google: 失敗 / DuckDuckGo Lite: 失敗 / Bing: 失敗 / DuckDuckGo Instant API: 失敗",
+      "evaluation": {
+        "request_id": "6369f33cf12b4bc5af59b9806f597ec0",
+        "experiment_mode": "DYNAMIC_ROUTING",
+        "test_case_id": "",
+        "route": "ローカル処理",
+        "response_time_sec": 3.102,
+        "local_time_sec": 3.095,
+        "cloud_time_sec": 0.0,
+        "api_called": false,
+        "cloud_api_call": "なし",
+        "estimated_api_reduction_count": 1,
+        "input_tokens": 5,
+        "output_tokens": 29,
+        "estimated_api_cost_yen": 0.0,
+        "estimated_cloud_baseline_cost_yen": 0.018,
+        "saved_cost_yen": 0.018,
+        "api_reduction_rate": 91.09,
+        "cloud_api_call_reduction_rate": 91.09,
+        "estimated_token_reduction_rate": 97.92,
+        "estimated_cost_reduction_rate": 99.46,
+        "user_rating": "",
+        "quality_passed": false
+      }
+    },
+    "followup_post_body": {},
+    "followup_response_json": {},
+    "followup_final_answer": null,
+    "ui_text_full": {
+      "user_bubble": "什么是边缘人工智能？请搜索并用日语总结。",
+      "assistant_bubble": "【route: local_search】\n検索結果を取得できませんでした。\n診断: Google: 失敗 / DuckDuckGo Lite: 失敗 / Bing: 失敗 / DuckDuckGo Instant API: 失敗",
+      "panel_text": "",
+      "followup_assistant_bubble": "",
+      "followup_panel_text": ""
+    },
+    "prompt_input": false,
+    "has_reference_links": false,
+    "timed_out": false,
+    "output_order": {
+      "has_translation_heading": false,
+      "has_summary_heading": false,
+      "has_links_heading": false,
+      "first_5_lines": [
+        "【route: local_search】",
+        "検索結果を取得できませんでした。",
+        "診断: Google: 失敗 / DuckDuckGo Lite: 失敗 / Bing: 失敗 / DuckDuckGo Instant API: 失敗"
+      ]
+    }
+  },
+  {
+    "id": "D",
+    "session_id": "audit-d-ea939f79bd4848879e7405c48e97d145",
+    "input": "엣지 AI란 무엇인가요? 검색해서 일본어로 요약해 주세요.",
+    "followup_input": null,
+    "intent": "search",
+    "route": "local_search",
+    "post_body": {
+      "message": "엣지 AI란 무엇인가요? 검색해서 일본어로 요약해 주세요.",
+      "session_id": "audit-d-ea939f79bd4848879e7405c48e97d145"
+    },
+    "response_json": {
+      "ok": true,
+      "attempt": 1,
+      "fallback_used": false,
+      "session_id": "audit-d-ea939f79bd4848879e7405c48e97d145",
+      "experiment_mode": "DYNAMIC_ROUTING",
+      "test_case_id": "",
+      "route": "local_search",
+      "response": "【route: local_search】\n検索結果を取得できませんでした。\n診断: Google: 失敗 / DuckDuckGo Lite: 失敗 / Bing: 失敗 / DuckDuckGo Instant API: 失敗",
+      "evaluation": {
+        "request_id": "854b382cab9d45a395750259145dd241",
+        "experiment_mode": "DYNAMIC_ROUTING",
+        "test_case_id": "",
+        "route": "ローカル処理",
+        "response_time_sec": 2.45,
+        "local_time_sec": 2.446,
+        "cloud_time_sec": 0.0,
+        "api_called": false,
+        "cloud_api_call": "なし",
+        "estimated_api_reduction_count": 1,
+        "input_tokens": 8,
+        "output_tokens": 29,
+        "estimated_api_cost_yen": 0.0,
+        "estimated_cloud_baseline_cost_yen": 0.018,
+        "saved_cost_yen": 0.018,
+        "api_reduction_rate": 91.1,
+        "cloud_api_call_reduction_rate": 91.1,
+        "estimated_token_reduction_rate": 97.92,
+        "estimated_cost_reduction_rate": 99.46,
+        "user_rating": "",
+        "quality_passed": false
+      }
+    },
+    "followup_post_body": {},
+    "followup_response_json": {},
+    "followup_final_answer": null,
+    "ui_text_full": {
+      "user_bubble": "엣지 AI란 무엇인가요? 검색해서 일본어로 요약해 주세요.",
+      "assistant_bubble": "【route: local_search】\n検索結果を取得できませんでした。\n診断: Google: 失敗 / DuckDuckGo Lite: 失敗 / Bing: 失敗 / DuckDuckGo Instant API: 失敗",
+      "panel_text": "",
+      "followup_assistant_bubble": "",
+      "followup_panel_text": ""
+    },
+    "prompt_input": false,
+    "has_reference_links": false,
+    "timed_out": false,
+    "output_order": {
+      "has_translation_heading": false,
+      "has_summary_heading": false,
+      "has_links_heading": false,
+      "first_5_lines": [
+        "【route: local_search】",
+        "検索結果を取得できませんでした。",
+        "診断: Google: 失敗 / DuckDuckGo Lite: 失敗 / Bing: 失敗 / DuckDuckGo Instant API: 失敗"
+      ]
+    }
+  },
+  {
+    "id": "E",
+    "session_id": "audit-e-e31f4c9c25a9435a956a2c51abc03571",
+    "input": "この2つを比較して",
+    "followup_input": "PythonとJava",
+    "intent": "cloud",
+    "route": "local_llm",
+    "post_body": {
+      "message": "この2つを比較して",
+      "session_id": "audit-e-e31f4c9c25a9435a956a2c51abc03571"
+    },
+    "response_json": {
+      "ok": true,
+      "attempt": 1,
+      "fallback_used": false,
+      "session_id": "audit-e-e31f4c9c25a9435a956a2c51abc03571",
+      "experiment_mode": "DYNAMIC_ROUTING",
+      "test_case_id": "",
+      "route": "local_llm",
+      "response": "確認質問：比較したい2つの対象を入力してください（例: PythonとJava）。",
+      "ui": {
+        "type": "prompt_input",
+        "title": "比較したい2つの対象を入力してください（例: PythonとJava）。",
+        "description": "不足している情報を入力すると、同じ質問を再演算します。",
+        "interaction": "recompute",
+        "placeholder": "不足している情報を入力してください",
+        "field": "clarification_answer",
+        "button_label": "再演算",
+        "template": "元の依頼：この2つを比較して\n追加情報：{value}\n上記の追加情報を使って元の依頼を再計算してください。"
+      },
+      "evaluation": {
+        "request_id": "76c6fc15687e4573965a61e42547ab72",
+        "experiment_mode": "DYNAMIC_ROUTING",
+        "test_case_id": "",
+        "route": "ローカルLLM",
+        "response_time_sec": 0.004,
+        "local_time_sec": 0.0,
+        "cloud_time_sec": 0.0,
+        "api_called": false,
+        "cloud_api_call": "なし",
+        "estimated_api_reduction_count": 1,
+        "input_tokens": 3,
+        "output_tokens": 11,
+        "estimated_api_cost_yen": 0.0,
+        "estimated_cloud_baseline_cost_yen": 0.018,
+        "saved_cost_yen": 0.018,
+        "api_reduction_rate": 91.11,
+        "cloud_api_call_reduction_rate": 91.11,
+        "estimated_token_reduction_rate": 97.92,
+        "estimated_cost_reduction_rate": 99.46,
+        "user_rating": "",
+        "quality_passed": false
+      }
+    },
+    "followup_post_body": {
+      "message": "元の依頼：この2つを比較して\n追加情報：PythonとJava\n上記の追加情報を使って元の依頼を再計算してください。",
+      "session_id": "audit-e-e31f4c9c25a9435a956a2c51abc03571"
+    },
+    "followup_response_json": {
+      "ok": true,
+      "attempt": 2,
+      "fallback_used": true,
+      "session_id": "audit-e-e31f4c9c25a9435a956a2c51abc03571",
+      "experiment_mode": "DYNAMIC_ROUTING",
+      "test_case_id": "",
+      "route": "local_llm",
+      "response": "PythonとJavaを比較して、元の依頼に対する最終回答です。\n\n両者はプログラミング言語ですが、Pythonは易しい学習性と柔軟性が高く、Javaは大規模アプリケーションやAndroidアプリケーションの開発に適しています。",
+      "evaluation": {
+        "request_id": "138fc22d534443db899fdb8d9d511de9",
+        "experiment_mode": "DYNAMIC_ROUTING",
+        "test_case_id": "",
+        "route": "ローカルLLM",
+        "response_time_sec": 81.329,
+        "local_time_sec": 81.326,
+        "cloud_time_sec": 0.0,
+        "api_called": false,
+        "cloud_api_call": "なし",
+        "estimated_api_reduction_count": 1,
+        "input_tokens": 15,
+        "output_tokens": 29,
+        "estimated_api_cost_yen": 0.0,
+        "estimated_cloud_baseline_cost_yen": 0.018,
+        "saved_cost_yen": 0.018,
+        "api_reduction_rate": 91.12,
+        "cloud_api_call_reduction_rate": 91.12,
+        "estimated_token_reduction_rate": 97.93,
+        "estimated_cost_reduction_rate": 99.46,
+        "user_rating": "",
+        "quality_passed": false
+      }
+    },
+    "followup_final_answer": "PythonとJavaを比較して、元の依頼に対する最終回答です。\n\n両者はプログラミング言語ですが、Pythonは易しい学習性と柔軟性が高く、Javaは大規模アプリケーションやAndroidアプリケーションの開発に適しています。",
+    "ui_text_full": {
+      "user_bubble": "この2つを比較して",
+      "assistant_bubble": "確認質問：比較したい2つの対象を入力してください（例: PythonとJava）。",
+      "panel_text": "比較したい2つの対象を入力してください（例: PythonとJava）。\n不足している情報を入力すると、同じ質問を再演算します。\n再演算",
+      "followup_assistant_bubble": "PythonとJavaを比較して、元の依頼に対する最終回答です。\n\n両者はプログラミング言語ですが、Pythonは易しい学習性と柔軟性が高く、Javaは大規模アプリケーションやAndroidアプリケーションの開発に適しています。",
+      "followup_panel_text": ""
+    },
+    "prompt_input": true,
+    "has_reference_links": false,
+    "timed_out": false,
+    "output_order": {
+      "has_translation_heading": false,
+      "has_summary_heading": false,
+      "has_links_heading": false,
+      "first_5_lines": [
+        "確認質問：比較したい2つの対象を入力してください（例: PythonとJava）。"
+      ]
+    }
+  },
+  {
+    "id": "F",
+    "session_id": "audit-f-9875566668ca4c9fa16918bef0dc0424",
+    "input": "これを計算して",
+    "followup_input": "(150+230)÷19",
+    "intent": "calculate",
+    "route": "local_function",
+    "post_body": {
+      "message": "これを計算して",
+      "session_id": "audit-f-9875566668ca4c9fa16918bef0dc0424"
+    },
+    "response_json": {
+      "ok": true,
+      "attempt": 1,
+      "fallback_used": false,
+      "session_id": "audit-f-9875566668ca4c9fa16918bef0dc0424",
+      "experiment_mode": "DYNAMIC_ROUTING",
+      "test_case_id": "",
+      "route": "local_function",
+      "response": "確認質問：計算したい式や数値を1つ入力してください（例: 10+20 / 1250×38）。",
+      "ui": {
+        "type": "prompt_input",
+        "title": "計算したい式や数値を1つ入力してください（例: 10+20 / 1250×38）。",
+        "description": "不足している情報を入力すると、同じ質問を再演算します。",
+        "interaction": "recompute",
+        "placeholder": "不足している情報を入力してください",
+        "field": "clarification_answer",
+        "button_label": "再演算",
+        "template": "元の依頼：これを計算して\n追加情報：{value}\n上記の追加情報を使って元の依頼を再計算してください。"
+      },
+      "evaluation": {
+        "request_id": "ba05cd32c150450295412a264a3a3708",
+        "experiment_mode": "DYNAMIC_ROUTING",
+        "test_case_id": "",
+        "route": "ローカル処理",
+        "response_time_sec": 0.003,
+        "local_time_sec": 0.0,
+        "cloud_time_sec": 0.0,
+        "api_called": false,
+        "cloud_api_call": "なし",
+        "estimated_api_reduction_count": 1,
+        "input_tokens": 2,
+        "output_tokens": 12,
+        "estimated_api_cost_yen": 0.0,
+        "estimated_cloud_baseline_cost_yen": 0.018,
+        "saved_cost_yen": 0.018,
+        "api_reduction_rate": 91.13,
+        "cloud_api_call_reduction_rate": 91.13,
+        "estimated_token_reduction_rate": 97.93,
+        "estimated_cost_reduction_rate": 99.46,
+        "user_rating": "",
+        "quality_passed": false
+      }
+    },
+    "followup_post_body": {
+      "message": "元の依頼：これを計算して\n追加情報：(150+230)÷19\n上記の追加情報を使って元の依頼を再計算してください。",
+      "session_id": "audit-f-9875566668ca4c9fa16918bef0dc0424"
+    },
+    "followup_response_json": {
+      "ok": true,
+      "attempt": 1,
+      "fallback_used": false,
+      "session_id": "audit-f-9875566668ca4c9fa16918bef0dc0424",
+      "experiment_mode": "DYNAMIC_ROUTING",
+      "test_case_id": "",
+      "route": "local_function",
+      "response": "答えは20です。",
+      "evaluation": {
+        "request_id": "02a9ea4b4f504a49958091fea51ddd22",
+        "experiment_mode": "DYNAMIC_ROUTING",
+        "test_case_id": "",
+        "route": "ローカル処理",
+        "response_time_sec": 0.007,
+        "local_time_sec": 0.0,
+        "cloud_time_sec": 0.0,
+        "api_called": false,
+        "cloud_api_call": "なし",
+        "estimated_api_reduction_count": 1,
+        "input_tokens": 15,
+        "output_tokens": 2,
+        "estimated_api_cost_yen": 0.0,
+        "estimated_cloud_baseline_cost_yen": 0.018,
+        "saved_cost_yen": 0.018,
+        "api_reduction_rate": 91.14,
+        "cloud_api_call_reduction_rate": 91.14,
+        "estimated_token_reduction_rate": 97.93,
+        "estimated_cost_reduction_rate": 99.46,
+        "user_rating": "",
+        "quality_passed": false
+      }
+    },
+    "followup_final_answer": "答えは20です。",
+    "ui_text_full": {
+      "user_bubble": "これを計算して",
+      "assistant_bubble": "確認質問：計算したい式や数値を1つ入力してください（例: 10+20 / 1250×38）。",
+      "panel_text": "計算したい式や数値を1つ入力してください（例: 10+20 / 1250×38）。\n不足している情報を入力すると、同じ質問を再演算します。\n再演算",
+      "followup_assistant_bubble": "答えは20です。",
+      "followup_panel_text": ""
+    },
+    "prompt_input": true,
+    "has_reference_links": false,
+    "timed_out": false,
+    "output_order": {
+      "has_translation_heading": false,
+      "has_summary_heading": false,
+      "has_links_heading": false,
+      "first_5_lines": [
+        "確認質問：計算したい式や数値を1つ入力してください（例: 10+20 / 1250×38）。"
+      ]
+    }
+  },
+  {
+    "id": "G",
+    "session_id": "audit-g-e5cad2bda0cc41e2932f277fb1b5d594",
+    "input": "PythonとJavaの主な違いを比較して",
+    "followup_input": null,
+    "intent": "cloud",
+    "route": "local_llm",
+    "post_body": {
+      "message": "PythonとJavaの主な違いを比較して",
+      "session_id": "audit-g-e5cad2bda0cc41e2932f277fb1b5d594"
+    },
+    "response_json": {
+      "ok": true,
+      "attempt": 1,
+      "fallback_used": false,
+      "session_id": "audit-g-e5cad2bda0cc41e2932f277fb1b5d594",
+      "experiment_mode": "DYNAMIC_ROUTING",
+      "test_case_id": "",
+      "route": "local_llm",
+      "response": "PythonとJavaは、プログラミング言語の2つで、主な違いはいくつかあります。まず、Pythonは動的型付け言語です。つまり、変数の型が宣言されないという意味です。一方、Javaは静的型付け言語で、変数の型を宣言する必要があります。",
+      "evaluation": {
+        "request_id": "d82b7aa3d8d54448bd96da0ab3b583e1",
+        "experiment_mode": "DYNAMIC_ROUTING",
+        "test_case_id": "",
+        "route": "ローカルLLM",
+        "response_time_sec": 34.223,
+        "local_time_sec": 34.216,
+        "cloud_time_sec": 0.0,
+        "api_called": false,
+        "cloud_api_call": "なし",
+        "estimated_api_reduction_count": 1,
+        "input_tokens": 6,
+        "output_tokens": 30,
+        "estimated_api_cost_yen": 0.0,
+        "estimated_cloud_baseline_cost_yen": 0.018,
+        "saved_cost_yen": 0.018,
+        "api_reduction_rate": 91.14,
+        "cloud_api_call_reduction_rate": 91.14,
+        "estimated_token_reduction_rate": 97.93,
+        "estimated_cost_reduction_rate": 99.46,
+        "user_rating": "",
+        "quality_passed": false
+      }
+    },
+    "followup_post_body": {},
+    "followup_response_json": {},
+    "followup_final_answer": null,
+    "ui_text_full": {
+      "user_bubble": "PythonとJavaの主な違いを比較して",
+      "assistant_bubble": "PythonとJavaは、プログラミング言語の2つで、主な違いはいくつかあります。まず、Pythonは動的型付け言語です。つまり、変数の型が宣言されないという意味です。一方、Javaは静的型付け言語で、変数の型を宣言する必要があります。",
+      "panel_text": "",
+      "followup_assistant_bubble": "",
+      "followup_panel_text": ""
+    },
+    "prompt_input": false,
+    "has_reference_links": false,
+    "timed_out": false,
+    "output_order": {
+      "has_translation_heading": false,
+      "has_summary_heading": false,
+      "has_links_heading": false,
+      "first_5_lines": [
+        "PythonとJavaは、プログラミング言語の2つで、主な違いはいくつかあります。まず、Pythonは動的型付け言語です。つまり、変数の型が宣言されないという意味です。一方、Javaは静的型付け言語で、変数の型を宣言する必要があります。"
+      ]
+    }
+  },
+  {
+    "id": "H",
+    "session_id": "audit-h-e313a00dd4d04b87bbbd61d6122de63e",
+    "input": "10と20を足して",
+    "followup_input": null,
+    "intent": "calculate",
+    "route": "local_function",
+    "post_body": {
+      "message": "10と20を足して",
+      "session_id": "audit-h-e313a00dd4d04b87bbbd61d6122de63e"
+    },
+    "response_json": {
+      "ok": true,
+      "attempt": 1,
+      "fallback_used": false,
+      "session_id": "audit-h-e313a00dd4d04b87bbbd61d6122de63e",
+      "experiment_mode": "DYNAMIC_ROUTING",
+      "test_case_id": "",
+      "route": "local_function",
+      "response": "答えは30です。",
+      "evaluation": {
+        "request_id": "bab2a3e4ff0e47a9b595ce5fbf74daaf",
+        "experiment_mode": "DYNAMIC_ROUTING",
+        "test_case_id": "",
+        "route": "ローカル処理",
+        "response_time_sec": 0.003,
+        "local_time_sec": 0.0,
+        "cloud_time_sec": 0.0,
+        "api_called": false,
+        "cloud_api_call": "なし",
+        "estimated_api_reduction_count": 1,
+        "input_tokens": 3,
+        "output_tokens": 2,
+        "estimated_api_cost_yen": 0.0,
+        "estimated_cloud_baseline_cost_yen": 0.018,
+        "saved_cost_yen": 0.018,
+        "api_reduction_rate": 91.15,
+        "cloud_api_call_reduction_rate": 91.15,
+        "estimated_token_reduction_rate": 97.93,
+        "estimated_cost_reduction_rate": 99.46,
+        "user_rating": "",
+        "quality_passed": false
+      }
+    },
+    "followup_post_body": {},
+    "followup_response_json": {},
+    "followup_final_answer": null,
+    "ui_text_full": {
+      "user_bubble": "10と20を足して",
+      "assistant_bubble": "答えは30です。",
+      "panel_text": "",
+      "followup_assistant_bubble": "",
+      "followup_panel_text": ""
+    },
+    "prompt_input": false,
+    "has_reference_links": false,
+    "timed_out": false,
+    "output_order": {
+      "has_translation_heading": false,
+      "has_summary_heading": false,
+      "has_links_heading": false,
+      "first_5_lines": [
+        "答えは30です。"
+      ]
+    }
+  },
+  {
+    "id": "I",
+    "session_id": "audit-i-6bc706e12e26456693d121870310e214",
+    "input": "ここから目的地までの行き方を教えて",
+    "followup_input": "京都駅",
+    "intent": "navigation",
+    "route": "local_function",
+    "post_body": {
+      "message": "ここから目的地までの行き方を教えて",
+      "session_id": "audit-i-6bc706e12e26456693d121870310e214"
+    },
+    "response_json": {
+      "ok": true,
+      "attempt": 1,
+      "fallback_used": false,
+      "session_id": "audit-i-6bc706e12e26456693d121870310e214",
+      "experiment_mode": "DYNAMIC_ROUTING",
+      "test_case_id": "",
+      "route": "local_function",
+      "response": "確認質問：目的地を1つ入力してください（例: 東京駅 / 京都駅）。",
+      "ui": {
+        "type": "prompt_input",
+        "title": "目的地を1つ入力してください（例: 東京駅 / 京都駅）。",
+        "description": "不足している情報を入力すると、同じ質問を再演算します。",
+        "interaction": "recompute",
+        "placeholder": "不足している情報を入力してください",
+        "field": "clarification_answer",
+        "button_label": "再演算",
+        "template": "元の依頼：ここから目的地までの行き方を教えて\n追加情報：{value}\n上記の追加情報を使って元の依頼を再計算してください。"
+      },
+      "evaluation": {
+        "request_id": "e4f2237158684f13a07ef392f1e1aded",
+        "experiment_mode": "DYNAMIC_ROUTING",
+        "test_case_id": "",
+        "route": "ローカル処理",
+        "response_time_sec": 0.01,
+        "local_time_sec": 0.0,
+        "cloud_time_sec": 0.0,
+        "api_called": false,
+        "cloud_api_call": "なし",
+        "estimated_api_reduction_count": 1,
+        "input_tokens": 5,
+        "output_tokens": 9,
+        "estimated_api_cost_yen": 0.0,
+        "estimated_cloud_baseline_cost_yen": 0.018,
+        "saved_cost_yen": 0.018,
+        "api_reduction_rate": 91.16,
+        "cloud_api_call_reduction_rate": 91.16,
+        "estimated_token_reduction_rate": 97.93,
+        "estimated_cost_reduction_rate": 99.46,
+        "user_rating": "",
+        "quality_passed": false
+      }
+    },
+    "followup_post_body": {
+      "message": "元の依頼：ここから目的地までの行き方を教えて\n追加情報：京都駅\n上記の追加情報を使って元の依頼を再計算してください。",
+      "session_id": "audit-i-6bc706e12e26456693d121870310e214"
+    },
+    "followup_response_json": {
+      "ok": true,
+      "attempt": 1,
+      "fallback_used": false,
+      "session_id": "audit-i-6bc706e12e26456693d121870310e214",
+      "experiment_mode": "DYNAMIC_ROUTING",
+      "test_case_id": "",
+      "route": "local_function",
+      "response": "Takamatsu / Kagawa-ken / Japan → 京都駅 の目安です。\n出発地推定: IPベースの概算（provider: ipwho.is, 緯度34.3316374, 経度134.0454766）\n地点が異なる場合は『新宿駅から京都駅まで』のように出発地を明示してください。\n車: 約212分（240.0 km）\n公共交通機関: 取得できませんでした。\nGoogle Mapsリンク:\nhttps://www.google.com/maps/dir/?api=1&origin=Takamatsu+%2F+Kagawa-ken+%2F+Japan&destination=%E4%BA%AC%E9%83%BD%E9%A7%85",
+      "evaluation": {
+        "request_id": "5c7a95a05b9746a3ac82e6b1bc0e3ab6",
+        "experiment_mode": "DYNAMIC_ROUTING",
+        "test_case_id": "",
+        "route": "ローカル処理",
+        "response_time_sec": 3.639,
+        "local_time_sec": 3.217,
+        "cloud_time_sec": 0.0,
+        "api_called": false,
+        "cloud_api_call": "なし",
+        "estimated_api_reduction_count": 1,
+        "input_tokens": 15,
+        "output_tokens": 81,
+        "estimated_api_cost_yen": 0.0,
+        "estimated_cloud_baseline_cost_yen": 0.018,
+        "saved_cost_yen": 0.018,
+        "api_reduction_rate": 91.17,
+        "cloud_api_call_reduction_rate": 91.17,
+        "estimated_token_reduction_rate": 97.93,
+        "estimated_cost_reduction_rate": 99.46,
+        "user_rating": "",
+        "quality_passed": false
+      }
+    },
+    "followup_final_answer": "Takamatsu / Kagawa-ken / Japan → 京都駅 の目安です。\n出発地推定: IPベースの概算（provider: ipwho.is, 緯度34.3316374, 経度134.0454766）\n地点が異なる場合は『新宿駅から京都駅まで』のように出発地を明示してください。\n車: 約212分（240.0 km）\n公共交通機関: 取得できませんでした。\nGoogle Mapsリンク:\nhttps://www.google.com/maps/dir/?api=1&origin=Takamatsu+%2F+Kagawa-ken+%2F+Japan&destination=%E4%BA%AC%E9%83%BD%E9%A7%85",
+    "ui_text_full": {
+      "user_bubble": "ここから目的地までの行き方を教えて",
+      "assistant_bubble": "確認質問：目的地を1つ入力してください（例: 東京駅 / 京都駅）。",
+      "panel_text": "目的地を1つ入力してください（例: 東京駅 / 京都駅）。\n不足している情報を入力すると、同じ質問を再演算します。\n再演算",
+      "followup_assistant_bubble": "Takamatsu / Kagawa-ken / Japan → 京都駅 の目安です。\n出発地推定: IPベースの概算（provider: ipwho.is, 緯度34.3316374, 経度134.0454766）\n地点が異なる場合は『新宿駅から京都駅まで』のように出発地を明示してください。\n車: 約212分（240.0 km）\n公共交通機関: 取得できませんでした。\nGoogle Mapsリンク:\nhttps://www.google.com/maps/dir/?api=1&origin=Takamatsu+%2F+Kagawa-ken+%2F+Japan&destination=%E4%BA%AC%E9%83%BD%E9%A7%85",
+      "followup_panel_text": ""
+    },
+    "prompt_input": true,
+    "has_reference_links": false,
+    "timed_out": false,
+    "output_order": {
+      "has_translation_heading": false,
+      "has_summary_heading": false,
+      "has_links_heading": false,
+      "first_5_lines": [
+        "確認質問：目的地を1つ入力してください（例: 東京駅 / 京都駅）。"
+      ]
+    }
+  }
+]

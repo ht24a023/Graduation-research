@@ -1,3 +1,5 @@
+"""クラウドAIへの問い合わせをまとめる層で、必要時に外部回答へ切り替えます。"""
+
 from openai import OpenAI
 
 from config import OPENAI_API_KEY

@@ -1,3 +1,5 @@
+"""現在時刻や曜日を返す関数群で、日付・時間の質問に即答します。"""
+
 import datetime
 from functions.weather import _major_event_text
 

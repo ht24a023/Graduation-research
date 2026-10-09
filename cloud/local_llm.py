@@ -1,3 +1,5 @@
+"""ローカルLLMへの問い合わせをまとめる層で、外部通信を隠蔽して応答取得を簡単にします。"""
+
 import json
 import socket
 from collections.abc import Iterator
@@ -7,7 +9,7 @@ from urllib.request import Request, urlopen
 from config import OLLAMA_HOST, OLLAMA_MODEL, OLLAMA_TIMEOUT
 
 
-def _build_request(prompt: str, temperature: float, stream: bool) -> Request:
+def _build_request(prompt: str, temperature: float, stream: bool, response_format: str | None = None) -> Request:
     payload = {
         "model": OLLAMA_MODEL,
         "prompt": prompt,
@@ -16,6 +18,9 @@ def _build_request(prompt: str, temperature: float, stream: bool) -> Request:
             "temperature": temperature,
         },
     }
+
+    if response_format:
+        payload["format"] = response_format
 
     return Request(
         f"{OLLAMA_HOST.rstrip('/')}/api/generate",
@@ -60,6 +65,24 @@ def ask_local_llm(prompt: str, temperature: float = 0.7, timeout: float | None =
 
     except Exception as error:
         return f"（ローカルLLMエラー: {error}）"
+
+
+def ask_local_llm_json(prompt: str, timeout: float | None = None) -> dict | None:
+    request = _build_request(prompt, temperature=0.0, stream=False, response_format="json")
+    effective_timeout = OLLAMA_TIMEOUT if timeout is None else timeout
+
+    try:
+        with urlopen(request, timeout=effective_timeout) as response:
+            data = json.loads(response.read().decode("utf-8"))
+
+        answer = str(data.get("response", "") or "").strip()
+        if not answer:
+            return None
+
+        parsed = json.loads(answer)
+        return parsed if isinstance(parsed, dict) else None
+    except Exception:
+        return None
 
 
 def stream_local_llm(prompt: str, temperature: float = 0.7, timeout: float | None = None) -> Iterator[str]:
