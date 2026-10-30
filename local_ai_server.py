@@ -5,6 +5,7 @@
 from __future__ import annotations  # 型注釈の評価を遅らせ、後で定義する型も参照できるようにする
 
 import json       # JSON形式のデータをPythonの値に変換し、その逆の変換も行う
+import mimetypes
 import os         # 環境変数からサーバー設定を読み込む
 import re         # 正規表現で入力文の判定や文字列処理を行う
 import sys        # 発生中の例外情報を取得する
@@ -17,7 +18,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer  # HTTPリ�
 from typing import Any  # 任意の型の値を受け取ることを型注釈で示す
 from urllib.error import HTTPError, URLError  # HTTP応答のエラーや接続エラーを扱う
 from urllib.request import Request, urlopen  # HTTPリクエストを作成・送信し、応答を取得する
-from urllib.parse import urlparse  # URLを分解し、リクエストのパスを取り出す
+from urllib.parse import parse_qs, urlparse  # URLを分解し、リクエストのパスとクエリを取り出す
 from uuid import uuid4  # セッションIDやリクエストIDなどに使う識別子を生成する
 
 
@@ -147,6 +148,12 @@ _SESSION_HISTORY: dict[str, deque[dict[str, str]]] = {}
 _SESSION_LOCATION_CONTEXT: dict[str, dict[str, Any]] = {}
 _PENDING_API_APPROVAL: dict[str, dict[str, str]] = {}
 _SESSION_LOCATION_TTL_SECONDS = max(0, int(os.getenv("SESSION_LOCATION_TTL_SECONDS", "300")))
+_LOCATION_WEATHER_CACHE_TTL_SECONDS = max(60, int(os.getenv("LOCATION_WEATHER_CACHE_TTL_SECONDS", "1800")))
+_LOCATION_WEATHER_CACHE: dict[str, Any] = {
+  "payload": None,
+  "expires_at": 0.0,
+  "cache_key": "",
+}
 
 API_APPROVE_PREFIX = "__API_APPROVE__"
 API_REJECT_PREFIX = "__API_REJECT__"
@@ -358,6 +365,41 @@ def _looks_like_capability_question(text: str) -> bool:
     "このサーバー",
   )
   return any(keyword in normalized for keyword in capability_keywords)
+
+
+def _looks_like_greeting(text: str) -> bool:
+  normalized = (text or "").strip()
+  return bool(re.search(r"^(こんにちは|こんばんは|おはよう|やあ|もしもし|はじめまして)[!！。\s]*$", normalized))
+
+
+def _looks_like_translation_history_question(text: str) -> bool:
+  normalized = (text or "").strip()
+  if not normalized:
+    return False
+  return bool(re.search(r"(直前|さっき|前回|前の).*(翻訳).*(英文|英語)", normalized))
+
+
+def _extract_recent_translation_english(history: list[dict[str, str]]) -> str:
+  for turn in reversed(history[:-1]):
+    if turn.get("role") != "user":
+      continue
+    content = str(turn.get("content") or "").strip()
+    if not content:
+      continue
+    if _looks_like_translation_history_question(content):
+      continue
+    if not re.search(r"[A-Za-z]", content):
+      continue
+
+    quoted = re.search(r"[\"'“”‘’]([A-Za-z][^\"'“”‘’]{2,})[\"'“”‘’]", content)
+    if quoted:
+      return quoted.group(1).strip()
+
+    cleaned = re.sub(r"^(翻訳して|訳して|英訳して|和訳して|次を翻訳して|これを翻訳して)[：:\s]*", "", content, flags=re.IGNORECASE)
+    if re.search(r"[A-Za-z]", cleaned):
+      return cleaned.strip()
+    return content
+  return ""
 
 
 def _build_capability_payload() -> dict[str, Any]:
@@ -712,6 +754,7 @@ def _server_meta() -> dict[str, Any]:
     "routes": {
       "chat": "/chat",
       "chat_stream": "/chat/stream",
+      "location_weather": "/panel/location-weather",
       "evaluation_summary": "/evaluation/summary",
       "evaluation_feedback": "/evaluation/feedback",
       "evaluation_csv": "/evaluation/export.csv",
@@ -733,6 +776,224 @@ def _server_meta() -> dict[str, Any]:
       "valid_modes": sorted(VALID_ROUTING_MODES),
     },
   }
+
+
+def _parse_weather_panel_metrics(text: str) -> dict[str, str]:
+  source = str(text or "")
+
+  def pick(pattern: str) -> str:
+    match = re.search(pattern, source)
+    if not match:
+      return "—"
+    value = str(match.group(1) or "").strip()
+    return value or "—"
+
+  weather = pick(r"天気は(.+?)です。")
+  current_temp = pick(r"現在気温：([^\n]+)")
+  high_temp = pick(r"最高気温：([^\n]+)")
+  low_temp = pick(r"最低気温：([^\n]+)")
+  precipitation = pick(r"最大降水確率：([^\n]+)")
+  humidity = pick(r"(?:現在湿度|予想最大湿度)：([^\n]+)")
+  wind_speed = pick(r"(?:現在風速|予想最大風速)：([^\n]+)")
+  wind_direction = pick(r"風向：([^\n]+)")
+  timezone_name = pick(r"タイムゾーン：([^\n]+)")
+  local_time = pick(r"現地時刻：([^\n]+)")
+  observed_at = pick(r"取得日時：([^\n]+)")
+
+  return {
+    "weather": weather,
+    "current_temp": current_temp,
+    "high_temp": high_temp,
+    "low_temp": low_temp,
+    "precipitation": precipitation,
+    "humidity": humidity,
+    "wind_speed": wind_speed,
+    "wind_direction": wind_direction,
+    "timezone": timezone_name,
+    "local_time": local_time,
+    "observed_at": observed_at,
+  }
+
+
+def _to_float_or_none(value: Any) -> float | None:
+  try:
+    if value in (None, ""):
+      return None
+    return float(value)
+  except Exception:
+    return None
+
+
+def _sanitize_label(value: str) -> str:
+  label = re.sub(r"\s+", " ", str(value or "").strip())
+  return label[:120]
+
+
+def _location_weather_cache_key(mode: str, details: dict[str, Any], manual_label: str, reason: str) -> str:
+  lat = _to_float_or_none(details.get("latitude"))
+  lon = _to_float_or_none(details.get("longitude"))
+  if mode == "device" and lat is not None and lon is not None:
+    return f"device:{lat:.4f}:{lon:.4f}"
+  if mode == "manual":
+    base = manual_label or str(details.get("city") or details.get("region") or details.get("country") or "manual")
+    return f"manual:{_sanitize_label(base).lower()}"
+  reason_key = _sanitize_label(reason).lower() if reason else ""
+  return f"ip:{reason_key}"
+
+
+def _build_location_weather_payload(
+  force_refresh: bool = False,
+  requested_mode: str = "ip",
+  location_details: dict[str, Any] | None = None,
+  manual_label: str = "",
+  accuracy_m: float | None = None,
+  fallback_reason: str = "",
+) -> dict[str, Any]:
+  mode = str(requested_mode or "ip").strip().lower()
+  if mode not in {"device", "ip", "manual"}:
+    mode = "ip"
+
+  details = dict(location_details or {}) if isinstance(location_details, dict) else {}
+
+  if mode == "ip" and not details:
+    details = get_location_details(use_cache=True) or {}
+
+  if mode == "manual" and not details:
+    details = {
+      "city": manual_label,
+      "region": "",
+      "country": "",
+      "latitude": None,
+      "longitude": None,
+      "provider": "manual",
+    }
+
+  lat = _to_float_or_none(details.get("latitude"))
+  lon = _to_float_or_none(details.get("longitude"))
+
+  if mode == "device" and (lat is None or lon is None):
+    ip_details = get_location_details(use_cache=True)
+    if isinstance(ip_details, dict):
+      details = dict(ip_details)
+      mode = "ip"
+    else:
+      mode = "ip"
+
+  cache_key = _location_weather_cache_key(mode, details, manual_label, fallback_reason)
+  now = time.time()
+  with _SESSION_LOCK:
+    cached = _LOCATION_WEATHER_CACHE.get("payload")
+    expires_at = float(_LOCATION_WEATHER_CACHE.get("expires_at") or 0.0)
+    cached_key = str(_LOCATION_WEATHER_CACHE.get("cache_key") or "")
+    if not force_refresh and isinstance(cached, dict) and expires_at > now and cached_key == cache_key:
+      payload = dict(cached)
+      payload["cache_hit"] = True
+      return payload
+
+  if not isinstance(details, dict) or not details:
+    payload = {
+      "ok": False,
+      "status": "location_failed",
+      "message": "現在地を取得できませんでした。IP推定も失敗しました。チャットはそのまま利用できます。",
+      "location": {
+        "label": "現在地: 取得失敗",
+        "city": "—",
+        "region": "—",
+        "country": "—",
+        "latitude": None,
+        "longitude": None,
+        "provider": "—",
+        "mode": "failed",
+        "accuracy_m": None,
+      },
+      "weather": {
+        "weather": "—",
+        "current_temp": "—",
+        "high_temp": "—",
+        "low_temp": "—",
+        "precipitation": "—",
+      },
+      "cache_hit": False,
+      "updated_at": int(now),
+      "next_refresh_sec": _LOCATION_WEATHER_CACHE_TTL_SECONDS,
+      "cache_key": cache_key,
+    }
+    with _SESSION_LOCK:
+      _LOCATION_WEATHER_CACHE["payload"] = payload
+      _LOCATION_WEATHER_CACHE["cache_key"] = cache_key
+      _LOCATION_WEATHER_CACHE["expires_at"] = now + min(120, _LOCATION_WEATHER_CACHE_TTL_SECONDS)
+    return payload
+
+  city = str(details.get("city") or "").strip()
+  region = str(details.get("region") or "").strip()
+  country = str(details.get("country") or "").strip()
+  lat = _to_float_or_none(details.get("latitude"))
+  lon = _to_float_or_none(details.get("longitude"))
+  provider = str(details.get("provider") or "unknown")
+
+  label_parts = [part for part in [city, region, country] if part and part != "—"]
+  location_label = " / ".join(label_parts) if label_parts else _sanitize_label(manual_label) or "不明"
+
+  if mode == "manual":
+    weather_query = f"{location_label}の天気"
+    weather_text = get_weather(weather_query)
+    message = "手動指定の地域で天気を表示しています。"
+  else:
+    weather_query = f"{location_label}の天気"
+    weather_text = get_weather(weather_query, current_location_details={
+      "city": city,
+      "region": region,
+      "country": country,
+      "latitude": lat,
+      "longitude": lon,
+    })
+    if mode == "device":
+      message = "端末位置で天気を表示しています。"
+    else:
+      fallback_suffix = f"（理由: {fallback_reason}）" if fallback_reason else ""
+      message = f"IP推定で天気を表示しています。{fallback_suffix}".strip()
+
+  metrics = _parse_weather_panel_metrics(weather_text)
+
+  mode_label = {
+    "device": "端末位置",
+    "ip": "IP推定",
+    "manual": "手動",
+  }.get(mode, "IP推定")
+
+  provider_label = provider
+  if mode == "manual":
+    provider_label = "manual"
+
+  payload = {
+    "ok": True,
+    "status": "ready",
+    "message": message,
+    "location": {
+      "label": f"{mode_label}: {location_label}",
+      "city": city or "—",
+      "region": region or "—",
+      "country": country or "—",
+      "latitude": lat,
+      "longitude": lon,
+      "provider": provider_label,
+      "mode": mode,
+      "accuracy_m": _to_float_or_none(accuracy_m),
+    },
+    "weather": metrics,
+    "raw_weather_text": weather_text,
+    "cache_hit": False,
+    "updated_at": int(now),
+    "next_refresh_sec": _LOCATION_WEATHER_CACHE_TTL_SECONDS,
+    "cache_key": cache_key,
+  }
+
+  with _SESSION_LOCK:
+    _LOCATION_WEATHER_CACHE["payload"] = payload
+    _LOCATION_WEATHER_CACHE["cache_key"] = cache_key
+    _LOCATION_WEATHER_CACHE["expires_at"] = now + _LOCATION_WEATHER_CACHE_TTL_SECONDS
+
+  return payload
 
 
 def _generate_llm_response(prompt: str) -> dict[str, Any]:
@@ -801,6 +1062,38 @@ def _approval_token(command_text: str, prefix: str) -> str:
   if len(parts) != 2:
     return ""
   return parts[1].strip()
+
+
+def _has_pending_api_approval_for_session(session_id: str) -> bool:
+  with _SESSION_LOCK:
+    return any((item.get("session_id") or "") == session_id for item in _PENDING_API_APPROVAL.values())
+
+
+def _clear_pending_api_approval_for_session(session_id: str) -> None:
+  with _SESSION_LOCK:
+    stale_tokens = [
+      token
+      for token, item in _PENDING_API_APPROVAL.items()
+      if (item.get("session_id") or "") == session_id
+    ]
+    for token in stale_tokens:
+      _PENDING_API_APPROVAL.pop(token, None)
+
+
+def _prefer_local_llm_over_search(text: str) -> bool:
+  normalized = (text or "").strip()
+  if not normalized:
+    return False
+
+  if re.search(r"^(こんにちは|こんばんは|おはよう|やあ|もしもし|はじめまして)", normalized):
+    return True
+  if re.search(r"(翻訳して|訳して|英訳|和訳)", normalized):
+    return True
+  if re.search(r"(さっき|直前|前の|この前).*(話|会話|質問|回答)|前述", normalized):
+    return True
+  if re.search(r"(ローカルLLM|ローカルモデル).*(使って|で|優先)", normalized):
+    return True
+  return False
 
 
 def _set_pending_api_approval(token: str, payload: dict[str, str]) -> None:
@@ -1084,11 +1377,21 @@ def _build_chat_payload(
       api_called = True
       return finalize(ok=False, route="error", error=f"（クラウド呼び出し失敗: {error}）")
 
+  if message.startswith(API_APPROVE_PREFIX) and not approve_token:
+    return finalize(ok=False, route="error", error="承認コマンド形式が不正です。承認ボタンから送信してください。")
+
   if reject_token:
     pending = _pop_pending_api_approval(reject_token)
     if not pending or pending.get("session_id") != session_id:
       return finalize(ok=False, route="error", error="承認待ちのAPI呼び出しが見つかりませんでした。")
 
+    response_text = "承知しました。今回はクラウドAPIを使わず、Google検索結果のみで終了します。"
+    _clear_pending_api_approval_for_session(session_id)
+    _append_turn(session_id, "assistant", response_text)
+    return finalize(ok=True, route="local_search", response=response_text)
+
+  if "今回はローカル結果でOK" in message and _has_pending_api_approval_for_session(session_id):
+    _clear_pending_api_approval_for_session(session_id)
     response_text = "承知しました。今回はクラウドAPIを使わず、Google検索結果のみで終了します。"
     _append_turn(session_id, "assistant", response_text)
     return finalize(ok=True, route="local_search", response=response_text)
@@ -1115,6 +1418,20 @@ def _build_chat_payload(
       extra={"ui": capability_payload["ui"]},
     )
 
+  if _looks_like_greeting(effective_message):
+    response_text = "こんにちは。ローカルで応答しています。"
+    _append_turn(session_id, "assistant", response_text)
+    return finalize(ok=True, route="local_function", response=response_text)
+
+  if _looks_like_translation_history_question(effective_message):
+    recent_english = _extract_recent_translation_english(history)
+    if recent_english:
+      response_text = f"直前に翻訳を頼まれた英文は次の内容です。\n{recent_english}"
+    else:
+      response_text = "このセッション内で翻訳対象の英文が見つかりませんでした。"
+    _append_turn(session_id, "assistant", response_text)
+    return finalize(ok=True, route="local_function", response=response_text)
+
   if explicit_note_payload:
     local_started = time.perf_counter()
     explicit_note_response = str(explicit_note_payload.get("response") or "")
@@ -1126,6 +1443,7 @@ def _build_chat_payload(
     return finalize(ok=True, route="local_function", response=explicit_note_response, extra=response_payload)
 
   intent = classify_intent(effective_message)
+  prefer_local_llm = _prefer_local_llm_over_search(effective_message)
   clarification_decision = None
   if not clarification_followup and experiment_mode != "FIXED_ROUTING":
     clarification_decision = _detect_required_clarification(effective_message, history, intent)
@@ -1211,18 +1529,27 @@ def _build_chat_payload(
       extra={"ui": weather_ui},
     )
 
-  if intent == "search":
+  if intent == "search" and not prefer_local_llm:
     local_started = time.perf_counter()
     search_payload = search_google_web_structured(recompute_message)
     local_time_sec += time.perf_counter() - local_started
+    fallback_search_result = search_google_web(recompute_message)
+    if search_payload.get("ok") and str(search_payload.get("search_engine") or "") == "Demo" and fallback_search_result and fallback_search_result not in {
+      "Google検索結果を取得できませんでした。",
+      "入力された文章を日本語へ翻訳できませんでした。日本語で入力し直すか、翻訳を再試行してください。",
+    }:
+      search_payload = {
+        **search_payload,
+        "summary_ja": fallback_search_result,
+        "search_engine": "Google",
+      }
     if search_payload.get("ok"):
-      route_label = str(search_payload.get("route") or "search")
+      route_label = "local_search"
       response_text = _format_structured_search_response(search_payload)
       _append_turn(session_id, "assistant", response_text)
       print(f"route={route_label}")
       return finalize(ok=True, route=route_label, response=response_text, extra={"ui": _build_search_success_ui()})
 
-    fallback_search_result = search_google_web(recompute_message)
     if fallback_search_result and fallback_search_result not in {
       "Google検索結果を取得できませんでした。",
       "入力された文章を日本語へ翻訳できませんでした。日本語で入力し直すか、翻訳を再試行してください。",
@@ -1238,18 +1565,27 @@ def _build_chat_payload(
     print("route=search_failed")
     return finalize(ok=True, route="search_failed", response=search_failure, extra={"ui": _build_search_failure_ui(), "error_type": error_type})
 
-  if _looks_like_fact_question(effective_message):
+  if _looks_like_fact_question(effective_message) and not prefer_local_llm:
     local_started = time.perf_counter()
     search_payload = search_google_web_structured(recompute_message)
     local_time_sec += time.perf_counter() - local_started
+    fallback_search_result = search_google_web(recompute_message)
+    if search_payload.get("ok") and str(search_payload.get("search_engine") or "") == "Demo" and fallback_search_result and fallback_search_result not in {
+      "Google検索結果を取得できませんでした。",
+      "入力された文章を日本語へ翻訳できませんでした。日本語で入力し直すか、翻訳を再試行してください。",
+    }:
+      search_payload = {
+        **search_payload,
+        "summary_ja": fallback_search_result,
+        "search_engine": "Google",
+      }
     if search_payload.get("ok"):
-      route_label = str(search_payload.get("route") or "search")
+      route_label = "local_search"
       response_text = _format_structured_search_response(search_payload)
       _append_turn(session_id, "assistant", response_text)
       print(f"route={route_label}")
       return finalize(ok=True, route=route_label, response=response_text, extra={"ui": _build_search_success_ui()})
 
-    fallback_search_result = search_google_web(recompute_message)
     if fallback_search_result and fallback_search_result not in {
       "Google検索結果を取得できませんでした。",
       "入力された文章を日本語へ翻訳できませんでした。日本語で入力し直すか、翻訳を再試行してください。",
@@ -1321,6 +1657,15 @@ def _build_chat_payload(
     fallback_response = _build_comparison_answer(clarification_followup[0], clarification_followup[1])
     _append_turn(session_id, "assistant", fallback_response)
     return finalize(ok=True, route="local_llm", response=fallback_response)
+
+  if _prefer_local_llm_over_search(effective_message):
+    return finalize(
+      ok=False,
+      route="error",
+      error=str(result.get("error") or "（ローカルLLM応答は不十分でした）"),
+      attempt=int(result.get("attempt", 1) or 1),
+      fallback_used=bool(result.get("fallback_used", False)),
+    )
 
   # DYNAMIC_ROUTING: do not call cloud immediately.
   # First show Google evidence and ask user whether cloud API usage is allowed.
@@ -1443,8 +1788,59 @@ def _stream_chat_payload(
       yield {"event": "error", "data": payload}
     return
 
-  update_profile_from_text(message)
-  explicit_note_payload = handle_explicit_note_command_with_meta(message)
+  if (
+    message.startswith(API_APPROVE_PREFIX)
+    or message.startswith(API_REJECT_PREFIX)
+    or ("今回はローカル結果でOK" in message and _has_pending_api_approval_for_session(session_id))
+  ):
+    payload = _build_chat_payload(
+      message,
+      session_id,
+      current_location=current_location,
+      experiment_mode=resolved_mode,
+      test_case_id=test_case_id,
+    )
+    if payload.get("ok"):
+      yield {"event": "done", "data": payload}
+    else:
+      yield {"event": "error", "data": payload}
+    return
+
+  clarification_followup = _parse_clarification_followup(message)
+  effective_message = clarification_followup[0] if clarification_followup else message
+
+  update_profile_from_text(effective_message)
+  explicit_note_payload = handle_explicit_note_command_with_meta(effective_message)
+
+  # /chat/stream では通常経路がLLMへ進みやすいため、DOC ID指定の表示要求は先にローカル処理する。
+  if not explicit_note_payload:
+    doc_match = re.search(r"\b(DOC\d{6})\b", effective_message, flags=re.IGNORECASE)
+    wants_show = bool(re.search(r"(出して|見せて|表示して|表示|見たい)", effective_message))
+    if doc_match and wants_show:
+      local_started = time.perf_counter()
+      doc_id = (doc_match.group(1) or "").upper()
+      document = get_document_item(doc_id=doc_id)
+      local_time_sec += time.perf_counter() - local_started
+
+      if document:
+        title = str(document.get("title") or "無題").strip() or "無題"
+        content = str(document.get("content") or "").strip() or "(本文なし)"
+        response_text = f"文書タイトル: {title}\n文書ID: {doc_id}\n本文:\n{content}"
+      else:
+        response_text = f"指定された文書が見つかりませんでした。文書ID: {doc_id}"
+
+      _append_turn(session_id, "assistant", response_text)
+      yield {
+        "event": "done",
+        "data": {
+          "response": response_text,
+          "session_id": session_id,
+          "experiment_mode": resolved_mode,
+          "test_case_id": test_case_id,
+          "evaluation": finalize_payload("local_function", response_text, True),
+        },
+      }
+      return
 
   _append_turn(session_id, "user", message)
   history = _snapshot_session(session_id)
@@ -1466,6 +1862,40 @@ def _stream_chat_payload(
         "test_case_id": test_case_id,
         "ui": capability_payload["ui"],
         "evaluation": evaluation,
+      },
+    }
+    return
+
+  if _looks_like_greeting(message):
+    response_text = "こんにちは。ローカルで応答しています。"
+    _append_turn(session_id, "assistant", response_text)
+    yield {
+      "event": "done",
+      "data": {
+        "response": response_text,
+        "session_id": session_id,
+        "experiment_mode": resolved_mode,
+        "test_case_id": test_case_id,
+        "evaluation": finalize_payload("local_function", response_text, True),
+      },
+    }
+    return
+
+  if _looks_like_translation_history_question(message):
+    recent_english = _extract_recent_translation_english(history)
+    if recent_english:
+      response_text = f"直前に翻訳を頼まれた英文は次の内容です。\n{recent_english}"
+    else:
+      response_text = "このセッション内で翻訳対象の英文が見つかりませんでした。"
+    _append_turn(session_id, "assistant", response_text)
+    yield {
+      "event": "done",
+      "data": {
+        "response": response_text,
+        "session_id": session_id,
+        "experiment_mode": resolved_mode,
+        "test_case_id": test_case_id,
+        "evaluation": finalize_payload("local_function", response_text, True),
       },
     }
     return
@@ -1576,14 +2006,14 @@ HTML_PAGE = """<!doctype html>
     :root {
       color-scheme: dark;
       --bg: #08111f;
-      --panel: rgba(15, 23, 42, 0.82);
-      --panel-2: rgba(30, 41, 59, 0.9);
+      --panel: rgba(8, 16, 30, 0.18);
+      --panel-2: rgba(8, 16, 30, 0.26);
       --text: #e5eefb;
       --muted: #94a3b8;
       --accent: #22c55e;
       --accent-2: #38bdf8;
-      --border: rgba(148, 163, 184, 0.25);
-      --shadow: 0 20px 60px rgba(0, 0, 0, 0.35);
+      --border: rgba(103, 232, 249, 0.18);
+      --shadow: 0 0 0 rgba(0, 0, 0, 0);
     }
 
     * { box-sizing: border-box; }
@@ -1650,18 +2080,18 @@ HTML_PAGE = """<!doctype html>
     }
 
     .panel {
-      border-radius: 24px;
-      border: 1px solid var(--border);
-      background: var(--panel);
+      border-radius: 12px;
+      border: 1px solid rgba(103, 232, 249, 0.14);
+      background: rgba(2, 10, 20, 0.08);
       box-shadow: var(--shadow);
       overflow: hidden;
-      backdrop-filter: blur(14px);
+      backdrop-filter: blur(3px);
     }
 
     .panel-header {
-      padding: 16px 18px;
-      border-bottom: 1px solid var(--border);
-      background: rgba(2, 6, 23, 0.2);
+      padding: 14px 16px;
+      border-bottom: 1px solid rgba(103, 232, 249, 0.14);
+      background: rgba(2, 10, 20, 0.06);
       display: flex;
       justify-content: space-between;
       align-items: center;
@@ -1672,7 +2102,7 @@ HTML_PAGE = """<!doctype html>
       font-size: 14px;
       letter-spacing: 0.06em;
       text-transform: uppercase;
-      color: #cbd5e1;
+      color: #d8f3ff;
     }
 
     .panel-body {
@@ -1698,6 +2128,70 @@ HTML_PAGE = """<!doctype html>
       line-height: 1.7;
       white-space: pre-wrap;
       word-break: break-word;
+      position: relative;
+      padding-right: 44px;
+    }
+
+    .bubble-head {
+      position: absolute;
+      right: 8px;
+      bottom: 8px;
+      margin: 0;
+    }
+
+    .bubble-copy-btn {
+      width: 32px;
+      height: 32px;
+      min-width: 32px;
+      min-height: 32px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border: none;
+      border-radius: 8px;
+      background: transparent;
+      color: var(--muted);
+      padding: 0;
+      cursor: pointer;
+      opacity: 0;
+      visibility: hidden;
+      transition: opacity 0.16s ease, color 0.16s ease, background-color 0.16s ease;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    .bubble-copy-btn svg {
+      width: 18px;
+      height: 18px;
+      stroke: currentColor;
+      stroke-width: 1.8;
+      fill: none;
+      pointer-events: none;
+    }
+
+    .bubble:hover .bubble-copy-btn,
+    .bubble:focus-within .bubble-copy-btn {
+      opacity: 1;
+      visibility: visible;
+    }
+
+    .bubble-copy-btn:hover,
+    .bubble-copy-btn:focus-visible {
+      color: var(--accent-2);
+      background: rgba(148, 163, 184, 0.14);
+      outline: none;
+    }
+
+    .bubble-copy-btn.is-copied {
+      color: #86efac;
+      opacity: 1;
+      visibility: visible;
+    }
+
+    @media (hover: none), (pointer: coarse) {
+      .bubble-copy-btn {
+        opacity: 1;
+        visibility: visible;
+      }
     }
 
     .bubble a {
@@ -1722,6 +2216,371 @@ HTML_PAGE = """<!doctype html>
       font-size: 13px;
       padding: 8px 12px;
       background: rgba(15, 23, 42, 0.5);
+    }
+
+    .geo-panel {
+      display: grid;
+      gap: 12px;
+      border-color: rgba(103, 232, 249, 0.2);
+      background: rgba(1, 10, 24, 0.08);
+    }
+
+    .geo-header {
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      color: #bae6fd;
+      text-transform: uppercase;
+    }
+
+    .geo-controls {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr) auto;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .geo-source-select,
+    .geo-manual-input {
+      border-radius: 8px;
+      border: 1px solid rgba(103, 232, 249, 0.2);
+      background: rgba(2, 8, 20, 0.2);
+      color: var(--text);
+      padding: 8px 10px;
+      font-size: 12px;
+      min-height: 36px;
+    }
+
+    .geo-manual-input {
+      width: 100%;
+    }
+
+    .geo-action-btn {
+      width: 36px;
+      height: 36px;
+      min-width: 36px;
+      border-radius: 8px;
+      border: 1px solid rgba(103, 232, 249, 0.2);
+      background: rgba(2, 8, 20, 0.2);
+      color: #a5f3fc;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0;
+      box-shadow: none;
+      transition: background-color 0.16s ease, color 0.16s ease, border-color 0.16s ease;
+    }
+
+    .geo-action-btn svg {
+      width: 18px;
+      height: 18px;
+      stroke: currentColor;
+      fill: none;
+      stroke-width: 1.8;
+    }
+
+    .geo-action-btn:hover,
+    .geo-action-btn:focus-visible {
+      background: rgba(125, 211, 252, 0.08);
+      color: #67e8f9;
+      border-color: rgba(125, 211, 252, 0.42);
+      outline: none;
+    }
+
+    .geo-maps-wrap {
+      display: grid;
+      gap: 10px;
+      margin-bottom: 10px;
+    }
+
+    .geo-map-block {
+      display: grid;
+      gap: 6px;
+    }
+
+    .geo-map-title {
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      color: #7dd3fc;
+      font-weight: 700;
+    }
+
+    .geo-map-frame {
+      position: relative;
+      width: 100%;
+      aspect-ratio: 960 / 460;
+      border-radius: 8px;
+      overflow: hidden;
+      border: 1px solid rgba(103, 232, 249, 0.2);
+      background: transparent;
+    }
+
+    .geo-map-svg {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      display: block;
+      opacity: 0.92;
+    }
+
+    .geo-map-sea {
+      fill: transparent;
+    }
+
+    .geo-map-grid {
+      fill: none;
+      stroke: rgba(103, 232, 249, 0.22);
+      stroke-width: 0.75;
+      vector-effect: non-scaling-stroke;
+    }
+
+    .geo-map-land {
+      fill: rgba(6, 182, 212, 0.05);
+      stroke: rgba(103, 232, 249, 0.42);
+      stroke-width: 0.8;
+      vector-effect: non-scaling-stroke;
+    }
+
+    .geo-map-border {
+      fill: none;
+      stroke: rgba(125, 211, 252, 0.28);
+      stroke-width: 0.65;
+      vector-effect: non-scaling-stroke;
+    }
+
+    .geo-map-city {
+      fill: rgba(103, 232, 249, 0.74);
+      font-size: 15px;
+      font-family: "Segoe UI", "Noto Sans JP", sans-serif;
+      paint-order: stroke;
+      stroke: rgba(2, 6, 23, 0.55);
+      stroke-width: 3;
+      stroke-linejoin: round;
+    }
+
+    .geo-map-marker,
+    .geo-map-wave {
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      transform: translate(-50%, -50%);
+    }
+
+    .geo-map-marker {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #ff4d4d;
+      box-shadow: 0 0 8px rgba(255, 77, 77, 0.92), 0 0 16px rgba(255, 77, 77, 0.45);
+      z-index: 3;
+      cursor: pointer;
+      pointer-events: auto;
+    }
+
+    .geo-map-wave {
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      border: 1px solid rgba(255, 95, 95, 0.72);
+      animation: geo-wave 3s ease-out infinite;
+      z-index: 2;
+      pointer-events: none;
+    }
+
+    .geo-map-label {
+      position: absolute;
+      left: 8px;
+      bottom: 8px;
+      font-size: 11px;
+      color: #d8f3ff;
+      padding: 2px 0;
+      border-radius: 0;
+      border: none;
+      background: transparent;
+      text-shadow: 0 0 8px rgba(56, 189, 248, 0.25);
+      z-index: 3;
+    }
+
+    .geo-map-outside {
+      position: absolute;
+      right: 8px;
+      top: 8px;
+      font-size: 11px;
+      color: #fda4af;
+      border: 1px solid rgba(251, 113, 133, 0.3);
+      background: rgba(76, 5, 25, 0.18);
+      border-radius: 6px;
+      padding: 3px 7px;
+      opacity: 0;
+      transform: translateY(-4px);
+      transition: opacity 0.2s ease, transform 0.2s ease;
+      pointer-events: none;
+      z-index: 3;
+    }
+
+    .geo-map-outside.show {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    .geo-map-marker.hidden,
+    .geo-map-wave.hidden {
+      opacity: 0;
+    }
+
+    .geo-panel.paused .geo-map-wave {
+      animation-play-state: paused;
+    }
+
+    .geo-map-land.muted {
+      fill: rgba(6, 182, 212, 0.03);
+      stroke: rgba(103, 232, 249, 0.2);
+    }
+
+    .geo-map-land.focus {
+      fill: rgba(255, 77, 77, 0.12);
+      stroke: rgba(255, 122, 122, 0.6);
+      stroke-width: 1.1;
+    }
+
+    .geo-map-nav {
+      display: grid;
+      gap: 6px;
+    }
+
+    .geo-breadcrumb {
+      font-size: 11px;
+      color: #e7f8ff;
+      letter-spacing: 0.03em;
+      border-bottom: 1px solid rgba(103, 232, 249, 0.16);
+      padding-bottom: 4px;
+    }
+
+    .geo-nav-actions {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+
+    .geo-nav-btn {
+      width: auto;
+      padding: 6px 10px;
+      border-radius: 7px;
+      border: 1px solid rgba(103, 232, 249, 0.2);
+      background: rgba(2, 8, 20, 0.2);
+      color: #bae6fd;
+      font-size: 11px;
+      font-weight: 600;
+      box-shadow: none;
+    }
+
+    .geo-nav-btn:hover,
+    .geo-nav-btn:focus-visible {
+      border-color: rgba(125, 211, 252, 0.42);
+      color: #e7f8ff;
+      outline: none;
+    }
+
+    .geo-manual-candidates {
+      display: grid;
+      gap: 6px;
+      margin-top: 6px;
+    }
+
+    .geo-manual-candidate {
+      width: 100%;
+      text-align: left;
+      padding: 8px;
+      border-radius: 7px;
+      border: 1px solid rgba(103, 232, 249, 0.18);
+      background: rgba(2, 8, 20, 0.2);
+      color: #e2f3ff;
+      box-shadow: none;
+    }
+
+    .geo-manual-candidate small {
+      display: block;
+      color: rgba(186, 230, 253, 0.68);
+      margin-top: 2px;
+      line-height: 1.35;
+    }
+
+    .geo-info {
+      display: grid;
+      gap: 6px;
+      min-width: 0;
+    }
+
+    .geo-label {
+      color: #e7f8ff;
+      font-size: 13px;
+      font-weight: 700;
+      line-height: 1.4;
+      word-break: break-word;
+    }
+
+    .geo-meta {
+      color: rgba(186, 230, 253, 0.72);
+      font-size: 12px;
+      line-height: 1.45;
+      word-break: break-word;
+    }
+
+    .geo-weather-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+    }
+
+    .geo-weather-item {
+      border: 1px solid rgba(103, 232, 249, 0.16);
+      border-radius: 6px;
+      padding: 7px 8px;
+      background: transparent;
+      display: grid;
+      gap: 2px;
+    }
+
+    .geo-weather-item span {
+      color: #93c5fd;
+      font-size: 11px;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+
+    .geo-weather-item strong {
+      color: #eaf7ff;
+      font-size: 14px;
+      font-weight: 700;
+      line-height: 1.35;
+      word-break: break-word;
+    }
+
+    .geo-status {
+      color: rgba(148, 163, 184, 0.82);
+      font-size: 12px;
+      line-height: 1.45;
+      word-break: break-word;
+    }
+
+    .geo-panel.state-loading .geo-status {
+      color: #93c5fd;
+    }
+
+    .geo-panel.state-error .geo-status {
+      color: #fda4af;
+    }
+
+    @keyframes geo-spin {
+      from { transform: rotate(0deg); }
+      to { transform: rotate(360deg); }
+    }
+
+    @keyframes geo-wave {
+      0% { transform: translate(-50%, -50%) scale(0.72); opacity: 0.75; }
+      80% { transform: translate(-50%, -50%) scale(2.25); opacity: 0.06; }
+      100% { transform: translate(-50%, -50%) scale(2.45); opacity: 0; }
     }
 
     .choice-wrap {
@@ -1800,7 +2659,7 @@ HTML_PAGE = """<!doctype html>
 
     .meta-line {
       font-size: 12px;
-      color: var(--muted);
+      color: rgba(186, 230, 253, 0.72);
       line-height: 1.6;
       word-break: break-all;
     }
@@ -1988,9 +2847,9 @@ HTML_PAGE = """<!doctype html>
 
     .card {
       padding: 14px;
-      border-radius: 18px;
-      border: 1px solid var(--border);
-      background: rgba(15, 23, 42, 0.74);
+      border-radius: 10px;
+      border: 1px solid rgba(103, 232, 249, 0.14);
+      background: rgba(2, 10, 20, 0.06);
       color: var(--muted);
       line-height: 1.65;
     }
@@ -2011,49 +2870,316 @@ HTML_PAGE = """<!doctype html>
       box-shadow: 0 0 0 6px rgba(34, 197, 94, 0.15);
     }
 
+    .jarvis-shell {
+      width: min(1820px, calc(100% - 20px));
+      padding: 10px 0 20px;
+    }
+
+    .first-screen {
+      min-height: calc(100vh - 22px);
+      display: grid;
+      grid-template-columns: 320px minmax(0, 1fr) 330px;
+      gap: 10px;
+      align-items: stretch;
+    }
+
+    .hero,
+    .layout {
+      display: none;
+    }
+
+    .hud-left,
+    .hud-center {
+      min-height: 0;
+    }
+
+    .hud-left .panel-body,
+    .hud-center .panel-body {
+      height: calc(100% - 56px);
+      min-height: 0;
+    }
+
+    .hud-center {
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+    }
+
+    .chat-body {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .chat-body #chat-log {
+      min-height: 0;
+      max-height: none;
+      flex: 1;
+    }
+
+    .hud-right {
+      display: grid;
+      grid-template-rows: auto auto 1fr;
+      gap: 10px;
+      min-height: 0;
+    }
+
+    .clock-panel .panel-body {
+      display: grid;
+      gap: 4px;
+    }
+
+    .clock-time {
+      font-size: clamp(36px, 4vw, 46px);
+      line-height: 1;
+      letter-spacing: 0.03em;
+      color: #dbeafe;
+      font-weight: 700;
+    }
+
+    .clock-date {
+      font-size: 14px;
+      color: rgba(186, 230, 253, 0.68);
+      letter-spacing: 0.04em;
+    }
+
+    .runtime-grid {
+      display: grid;
+      gap: 6px;
+    }
+
+    .runtime-log-list {
+      margin: 0;
+      padding-left: 16px;
+      display: grid;
+      gap: 6px;
+      color: #cbd5e1;
+      font-size: 12px;
+      line-height: 1.5;
+      max-height: 190px;
+      overflow: auto;
+    }
+
+    .scroll-guide {
+      grid-column: 1 / -1;
+      justify-self: center;
+      align-self: end;
+      font-size: 12px;
+      color: #93c5fd;
+      opacity: 0.82;
+      padding: 6px 10px;
+      border-radius: 999px;
+      border: 1px solid rgba(147, 197, 253, 0.25);
+      background: rgba(2, 6, 23, 0.38);
+      margin-bottom: 2px;
+    }
+
+    .lower-section {
+      display: grid;
+      grid-template-columns: 1.3fr 1fr;
+      gap: 12px;
+      margin-top: 14px;
+      align-items: start;
+    }
+
+    .lower-section .panel .panel-body {
+      max-height: none;
+    }
+
+    .geo-panel {
+      background:
+        radial-gradient(circle at 16% 10%, rgba(56, 189, 248, 0.08), transparent 34%),
+        linear-gradient(170deg, rgba(1, 8, 22, 0.12), rgba(4, 14, 30, 0.08));
+      padding: 12px;
+    }
+
+    .hud-left,
+    .hud-right > .panel {
+      background: rgba(2, 8, 20, 0.05);
+      border-color: rgba(103, 232, 249, 0.14);
+    }
+
+    .hud-center {
+      background: linear-gradient(180deg, rgba(2, 8, 20, 0.46), rgba(2, 8, 20, 0.36));
+      border-color: rgba(148, 163, 184, 0.2);
+      backdrop-filter: blur(8px);
+    }
+
+    .geo-row {
+      grid-template-columns: 136px 1fr;
+      gap: 10px;
+    }
+
+    .geo-globe-wrap {
+      width: 136px;
+      height: 136px;
+    }
+
+    .geo-globe {
+      width: 124px;
+      height: 124px;
+    }
+
+    .geo-settings-fold {
+      margin-top: 8px;
+      border-top: 1px solid rgba(148, 163, 184, 0.24);
+      padding-top: 8px;
+    }
+
+    .geo-settings-fold summary {
+      list-style: none;
+      cursor: pointer;
+      color: #93c5fd;
+      font-size: 12px;
+      letter-spacing: 0.03em;
+      user-select: none;
+    }
+
+    .geo-settings-fold summary::-webkit-details-marker {
+      display: none;
+    }
+
+    .geo-settings-fold[open] summary {
+      margin-bottom: 8px;
+    }
+
+    .geo-status {
+      margin-top: 8px;
+    }
+
+    .geo-weather-grid {
+      margin-top: 8px;
+    }
+
+    @media (max-width: 1500px) {
+      .first-screen {
+        grid-template-columns: 300px minmax(0, 1fr) 300px;
+      }
+    }
+
+    @media (max-width: 1366px) {
+      .first-screen {
+        grid-template-columns: 280px minmax(0, 1fr) 280px;
+      }
+
+      .clock-time {
+        font-size: 34px;
+      }
+
+      .quick-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+    }
+
     @media (max-width: 860px) {
-      .layout { grid-template-columns: 1fr; }
+      .first-screen { grid-template-columns: 1fr; min-height: auto; }
+      .lower-section { grid-template-columns: 1fr; }
+      .hud-right { grid-template-rows: auto auto auto; }
       #chat-log { min-height: 48vh; max-height: none; }
       .bubble { max-width: 100%; }
       .composer { bottom: 0; }
       .row > * { flex: 1 1 100%; }
       button { width: 100%; }
+      .geo-controls { grid-template-columns: auto 1fr auto; }
+      .geo-action-btn { width: 36px; }
+      .geo-map-label,
+      .geo-map-outside { font-size: 10px; }
+      .geo-weather-grid { grid-template-columns: 1fr; }
+      .scroll-guide { display: none; }
     }
   </style>
 </head>
 <body>
-  <div class="shell">
-    <section class="hero">
-      <h1>Local AI Server</h1>
-      <p>このPC上の Ollama を使う、ローカル完結の会話サーバーです。iPhone からは同じWi-Fi内のURLを Safari で開いて使えます。</p>
-      <div class="toolbar">
-        <span class="chip status"><span class="dot"></span><span id="health-text">health: checking...</span></span>
-        <span class="chip" id="server-url-chip">url: loading...</span>
-        <span class="chip" id="server-ip-chip">ip: loading...</span>
-        <span class="chip">session-based</span>
-      </div>
-      <div class="toolbar" style="margin-top:12px;">
-        <span class="chip">/chat</span>
-        <span class="chip">/chat/stream</span>
-        <span class="chip">/health</span>
-        <span class="chip">/meta</span>
-        <span class="chip">/storage</span>
-        <span class="chip">/capabilities</span>
-        <span class="chip">/evaluation/summary</span>
-        <span class="chip">/evaluation/feedback</span>
-        <span class="chip">/evaluation/export.csv</span>
-      </div>
-    </section>
+  <div class="shell jarvis-shell">
+    <section class="first-screen">
+      <aside class="panel hud-left">
+        <div class="panel-header"><strong>Location</strong></div>
+        <div class="panel-body">
+          <div class="card geo-panel" id="geo-panel-card">
+            <div class="geo-maps-wrap">
+              <div class="geo-map-block">
+                <div class="geo-map-title">WORLD</div>
+                <div class="geo-map-frame" id="world-map-frame">
+                  <svg class="geo-map-svg" id="world-map-svg" viewBox="0 0 960 460" preserveAspectRatio="xMidYMid meet" aria-hidden="true"></svg>
+                  <div class="geo-map-marker" id="world-map-marker"></div>
+                  <div class="geo-map-wave" id="world-map-wave"></div>
+                  <div class="geo-map-label" id="world-map-label">—</div>
+                  <div class="geo-map-outside" id="world-map-outside"></div>
+                </div>
+              </div>
+              <div class="geo-map-block">
+                <div class="geo-map-title" id="geo-detail-title">JAPAN</div>
+                <div class="geo-map-frame" id="japan-map-frame">
+                  <svg class="geo-map-svg" id="japan-map-svg" viewBox="0 0 960 460" preserveAspectRatio="xMidYMid meet" aria-hidden="true"></svg>
+                  <div class="geo-map-marker" id="japan-map-marker"></div>
+                  <div class="geo-map-wave" id="japan-map-wave"></div>
+                  <div class="geo-map-label" id="japan-map-label">—</div>
+                  <div class="geo-map-outside" id="japan-map-outside">日本国外</div>
+                </div>
+              </div>
+            </div>
+            <div class="geo-map-nav">
+              <div class="geo-breadcrumb" id="geo-breadcrumb">世界</div>
+              <div class="geo-nav-actions">
+                <button class="geo-nav-btn" id="geo-nav-back-btn" type="button">戻る</button>
+                <button class="geo-nav-btn" id="geo-nav-home-btn" type="button">全体表示</button>
+              </div>
+            </div>
+            <div class="geo-info">
+              <div class="geo-label" id="geo-location-label">地点: 取得中...</div>
+              <div class="geo-meta" id="geo-location-meta">地域: — / 国: —</div>
+              <div class="geo-meta" id="geo-provider">取得元: —</div>
+              <div class="geo-meta" id="geo-latlon">緯度: — / 経度: —</div>
+              <div class="geo-meta" id="geo-accuracy">精度: —</div>
+              <div class="geo-meta">タイムゾーン: <span id="geo-timezone">—</span></div>
+              <div class="geo-meta">現地時刻: <span id="geo-local-time">—</span></div>
+              <div class="geo-meta">天気: <span id="geo-weather">—</span></div>
+              <div class="geo-meta">気温: <span id="geo-temp">—</span></div>
+              <div class="geo-meta">湿度: <span id="geo-humidity">—</span></div>
+              <div class="geo-meta">風: <span id="geo-wind">—</span></div>
+              <div class="geo-meta">更新時刻: <span id="geo-observed-at">—</span></div>
+            </div>
+            <details class="geo-settings-fold">
+              <summary>位置設定</summary>
+              <div class="geo-controls">
+                <button class="geo-action-btn" id="geo-fetch-btn" type="button" aria-label="現在地を取得" title="現在地を取得">
+                  <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                    <circle cx="12" cy="12" r="5"></circle>
+                    <path d="M12 2v3M12 19v3M2 12h3M19 12h3"></path>
+                  </svg>
+                </button>
+                <select class="geo-source-select" id="geo-source-select" aria-label="位置情報モード">
+                  <option value="device">端末位置</option>
+                  <option value="ip" selected>IP推定</option>
+                  <option value="manual">手動</option>
+                </select>
+                <button class="geo-action-btn" id="geo-manual-apply-btn" type="button" aria-label="手動地域を反映" title="手動地域を反映">
+                  <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                    <path d="M5 12h14"></path>
+                    <path d="M13 6l6 6-6 6"></path>
+                  </svg>
+                </button>
+              </div>
+              <input class="geo-manual-input" id="geo-manual-input" placeholder="手動地域（例: 京都）" />
+              <div class="geo-manual-candidates" id="geo-manual-candidates"></div>
+              <div class="geo-weather-grid">
+                <div class="geo-weather-item"><span>最高/最低</span><strong id="geo-hi-lo">— / —</strong></div>
+                <div class="geo-weather-item"><span>降水確率</span><strong id="geo-rain">—</strong></div>
+              </div>
+              <div class="geo-status" id="geo-status">取得中...</div>
+            </details>
+          </div>
+        </div>
+      </aside>
 
-    <div class="layout">
-      <section class="panel">
+      <section class="panel hud-center">
         <div class="panel-header">
           <strong>Chat</strong>
           <div class="status"><span class="dot"></span><span id="session-text">session ready</span></div>
         </div>
-        <div class="panel-body">
+        <div class="panel-body chat-body">
           <div id="chat-log"></div>
-          <div class="composer" style="margin-top:16px;">
+          <div class="composer" style="margin-top:12px;">
             <div class="quick-grid">
               <button class="secondary quick-prompt" type="button" data-text="このローカルサーバーでできることを具体例つきで教えて">できること</button>
               <button class="secondary quick-prompt" type="button" data-text="ここから東京駅までの行き方を教えて">ルート</button>
@@ -2071,54 +3197,91 @@ HTML_PAGE = """<!doctype html>
         </div>
       </section>
 
-      <aside class="panel">
+      <aside class="hud-right">
+        <section class="panel clock-panel">
+          <div class="panel-body">
+            <div class="clock-time" id="clock-time">--:--:--</div>
+            <div class="clock-date" id="clock-date">----/--/-- (---)</div>
+          </div>
+        </section>
+        <section class="panel runtime-panel">
+          <div class="panel-header"><strong>Runtime</strong></div>
+          <div class="panel-body runtime-grid">
+            <div class="meta-line">接続: <span id="runtime-connection">—</span></div>
+            <div class="meta-line">モデル: <span id="runtime-model">—</span></div>
+            <div class="meta-line">処理状態: <span id="runtime-processing">—</span></div>
+            <div class="meta-line">応答時間: <span id="runtime-latency">—</span></div>
+            <div class="meta-line">処理経路: <span id="runtime-route">—</span></div>
+            <div class="meta-line">クラウドLLM: <span id="runtime-cloud">—</span></div>
+            <div class="meta-line">health: <span id="health-text">checking...</span></div>
+            <div class="meta-line" id="server-url-chip">url: loading...</div>
+            <div class="meta-line" id="server-ip-chip">ip: loading...</div>
+          </div>
+        </section>
+        <section class="panel log-panel">
+          <div class="panel-header"><strong>Recent Logs</strong></div>
+          <div class="panel-body">
+            <ul class="runtime-log-list" id="runtime-log-list">
+              <li>—</li>
+            </ul>
+          </div>
+        </section>
+      </aside>
+
+      <div class="scroll-guide">文書管理と詳細設定は下にあります</div>
+    </section>
+
+    <section class="lower-section">
+      <div class="panel">
         <div class="panel-header">
-          <strong>Info</strong>
-        </div>
-        <div class="panel-body">
-          <div class="side-list">
-            <div class="card meta-line" id="meta-card">サーバー情報を取得しています。</div>
-            <div class="card template-manager">
-              <div class="doc-manager-header">
-                <span class="doc-manager-title">使える処理テンプレート</span>
-                <button id="capability-refresh-btn" class="secondary" type="button">更新</button>
-              </div>
-              <div class="doc-meta" id="capability-guide">このローカルサーバーで実行できる質問テンプレートを表示します。</div>
-              <div class="template-list" id="capability-template-list"></div>
-            </div>
-            <div class="card doc-manager">
-              <div class="doc-manager-header">
-                <span class="doc-manager-title">保存文書（自己PR）</span>
-                <div class="row" style="margin:0;">
-                  <button id="document-new-btn" class="secondary" type="button">新規作成</button>
-                  <button id="document-refresh-btn" class="secondary" type="button">更新</button>
-                </div>
-              </div>
-              <div class="doc-meta" id="document-current-card">現在表示中: なし</div>
-              <div class="doc-list" id="document-list"></div>
-              <div class="doc-editor">
-                <div class="doc-mode" id="document-mode">新規登録</div>
-                <input id="document-title" placeholder="文書タイトル" />
-                <textarea id="document-content" placeholder="選択した文書の本文"></textarea>
-                <div class="doc-actions">
-                  <button id="document-save-btn" type="button">保存</button>
-                  <button id="document-delete-btn" class="secondary" type="button">削除</button>
-                  <button id="document-clear-btn" class="secondary" type="button">選択解除</button>
-                </div>
-                <div class="doc-meta" id="document-meta">文書を選択してください。</div>
-              </div>
-            </div>
-            <div class="card">Ollama がローカルで起動している必要があります。</div>
-            <div class="card">スマホから使う場合は、iPhone の Safari で上の URL を開いてください。</div>
-            <div class="card">会話履歴は session id ごとに分けています。</div>
-            <div class="card" id="storage-card">DB状態を確認しています。</div>
-            <div class="card" id="health-card">サーバー状態を確認しています。</div>
+          <strong>Documents</strong>
+          <div class="row" style="margin:0;">
+            <button id="document-new-btn" class="secondary" type="button">新規作成</button>
+            <button id="document-refresh-btn" class="secondary" type="button">更新</button>
           </div>
         </div>
-      </aside>
-    </div>
+        <div class="panel-body">
+          <div class="card doc-manager">
+            <div class="doc-meta" id="document-current-card">現在表示中: なし</div>
+            <div class="doc-list" id="document-list"></div>
+            <div class="doc-editor">
+              <div class="doc-mode" id="document-mode">新規登録</div>
+              <input id="document-title" placeholder="文書タイトル" />
+              <textarea id="document-content" placeholder="選択した文書の本文"></textarea>
+              <div class="doc-actions">
+                <button id="document-save-btn" type="button">保存</button>
+                <button id="document-delete-btn" class="secondary" type="button">削除</button>
+                <button id="document-clear-btn" class="secondary" type="button">選択解除</button>
+              </div>
+              <div class="doc-meta" id="document-meta">文書を選択してください。</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-header"><strong>Details</strong></div>
+        <div class="panel-body side-list">
+          <div class="card meta-line" id="meta-card">サーバー情報を取得しています。</div>
+          <div class="card template-manager">
+            <div class="doc-manager-header">
+              <span class="doc-manager-title">使える処理テンプレート</span>
+              <button id="capability-refresh-btn" class="secondary" type="button">更新</button>
+            </div>
+            <div class="doc-meta" id="capability-guide">このローカルサーバーで実行できる質問テンプレートを表示します。</div>
+            <div class="template-list" id="capability-template-list"></div>
+          </div>
+          <div class="card" id="storage-card">DB状態を確認しています。</div>
+          <div class="card" id="health-card">サーバー状態を確認しています。</div>
+          <div class="card">Ollama がローカルで起動している必要があります。</div>
+          <div class="card">スマホから使う場合は、iPhone の Safari で上の URL を開いてください。</div>
+          <div class="card">会話履歴は session id ごとに分けています。</div>
+        </div>
+      </div>
+    </section>
   </div>
 
+  <script src="/site/maps/topojson-client.min.js"></script>
   <script>
     const chatLog = document.getElementById('chat-log');
     const messageInput = document.getElementById('message');
@@ -2147,9 +3310,124 @@ HTML_PAGE = """<!doctype html>
     const documentSaveBtn = document.getElementById('document-save-btn');
     const documentDeleteBtn = document.getElementById('document-delete-btn');
     const documentClearBtn = document.getElementById('document-clear-btn');
+    const geoPanelCard = document.getElementById('geo-panel-card');
+    const geoFetchBtn = document.getElementById('geo-fetch-btn');
+    const geoManualApplyBtn = document.getElementById('geo-manual-apply-btn');
+    const geoSourceSelect = document.getElementById('geo-source-select');
+    const geoManualInput = document.getElementById('geo-manual-input');
+    const worldMapSvg = document.getElementById('world-map-svg');
+    const japanMapSvg = document.getElementById('japan-map-svg');
+    const worldMapMarker = document.getElementById('world-map-marker');
+    const worldMapWave = document.getElementById('world-map-wave');
+    const japanMapMarker = document.getElementById('japan-map-marker');
+    const japanMapWave = document.getElementById('japan-map-wave');
+    const worldMapLabel = document.getElementById('world-map-label');
+    const japanMapLabel = document.getElementById('japan-map-label');
+    const japanMapOutside = document.getElementById('japan-map-outside');
+    const geoDetailTitle = document.getElementById('geo-detail-title');
+    const geoBreadcrumb = document.getElementById('geo-breadcrumb');
+    const geoNavBackBtn = document.getElementById('geo-nav-back-btn');
+    const geoNavHomeBtn = document.getElementById('geo-nav-home-btn');
+    const geoManualCandidates = document.getElementById('geo-manual-candidates');
+    const geoLocationLabel = document.getElementById('geo-location-label');
+    const geoLocationMeta = document.getElementById('geo-location-meta');
+    const geoLatLon = document.getElementById('geo-latlon');
+    const geoProvider = document.getElementById('geo-provider');
+    const geoAccuracy = document.getElementById('geo-accuracy');
+    const geoTimezone = document.getElementById('geo-timezone');
+    const geoLocalTime = document.getElementById('geo-local-time');
+    const geoHumidity = document.getElementById('geo-humidity');
+    const geoWind = document.getElementById('geo-wind');
+    const geoObservedAt = document.getElementById('geo-observed-at');
+    const geoWeather = document.getElementById('geo-weather');
+    const geoTemp = document.getElementById('geo-temp');
+    const geoHiLo = document.getElementById('geo-hi-lo');
+    const geoRain = document.getElementById('geo-rain');
+    const geoStatus = document.getElementById('geo-status');
+    const clockTime = document.getElementById('clock-time');
+    const clockDate = document.getElementById('clock-date');
+    const runtimeConnection = document.getElementById('runtime-connection');
+    const runtimeModel = document.getElementById('runtime-model');
+    const runtimeProcessing = document.getElementById('runtime-processing');
+    const runtimeLatency = document.getElementById('runtime-latency');
+    const runtimeRoute = document.getElementById('runtime-route');
+    const runtimeCloud = document.getElementById('runtime-cloud');
+    const runtimeLogList = document.getElementById('runtime-log-list');
 
     const storageKey = 'local-ai-session-id';
     const locationStorageKey = 'local-ai-current-location';
+    const geoPanelCacheKey = 'local-ai-geo-panel-cache-v1';
+    const geoPanelModeKey = 'local-ai-geo-mode-v1';
+    const geoManualRegionKey = 'local-ai-geo-manual-region-v1';
+
+    const geoState = {
+      mode: 'ip',
+      device: null,
+      manual: '',
+      manualResolvedAddress: '',
+      manualCandidates: [],
+      manualLock: false,
+      targetCoord: null,
+      panelVisible: true,
+      isInitialized: false,
+      requestSeq: 0,
+      appliedSeq: 0,
+      worldReady: false,
+      japanReady: false,
+      worldFeatures: [],
+      japanFeatures: [],
+      detailHistory: ['world'],
+      detailPath: ['世界'],
+      detailLevel: 'world',
+      selectedCountry: '',
+      selectedRegionBand: '',
+      selectedPrefecture: '',
+      selectedPrefCode: '',
+    };
+
+    const runtimeLogItems = [];
+
+    function appendRuntimeLog(message) {
+      const line = String(message || '').trim();
+      if (!line) {
+        return;
+      }
+      runtimeLogItems.unshift(line);
+      while (runtimeLogItems.length > 5) {
+        runtimeLogItems.pop();
+      }
+      runtimeLogList.innerHTML = '';
+      runtimeLogItems.forEach((item) => {
+        const li = document.createElement('li');
+        li.textContent = item;
+        runtimeLogList.appendChild(li);
+      });
+    }
+
+    function formatTokyoNow() {
+      const now = new Date();
+      const time = new Intl.DateTimeFormat('ja-JP', {
+        timeZone: 'Asia/Tokyo',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: false,
+      }).format(now);
+      const date = new Intl.DateTimeFormat('ja-JP', {
+        timeZone: 'Asia/Tokyo',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        weekday: 'short',
+      }).format(now);
+      return { time, date };
+    }
+
+    function refreshTokyoClock() {
+      const current = formatTokyoNow();
+      clockTime.textContent = current.time;
+      clockDate.textContent = current.date;
+    }
 
     function makeSessionId() {
       try {
@@ -2199,27 +3477,961 @@ HTML_PAGE = """<!doctype html>
     sessionInput.value = savedSessionId;
     const savedCurrentLocation = safeStorageGet(locationStorageKey) || '';
     locationInput.value = savedCurrentLocation;
+    const savedGeoMode = safeStorageGet(geoPanelModeKey) || 'ip';
+    const savedManualRegion = safeStorageGet(geoManualRegionKey) || '';
+    geoState.mode = ['device', 'ip', 'manual'].includes(savedGeoMode) ? savedGeoMode : 'ip';
+    geoState.manual = savedManualRegion;
+    if (geoSourceSelect) {
+      geoSourceSelect.value = geoState.mode;
+    }
+    if (geoManualInput) {
+      geoManualInput.value = geoState.manual;
+    }
 
     function persistCurrentLocation(value) {
       safeStorageSet(locationStorageKey, value || '');
     }
 
-    function refreshBrowserLocation() {
-      if (!navigator.geolocation) {
+    function persistGeoMode(mode) {
+      safeStorageSet(geoPanelModeKey, mode || 'ip');
+    }
+
+    function persistManualRegion(value) {
+      safeStorageSet(geoManualRegionKey, value || '');
+    }
+
+    function normalizeMode(value) {
+      const mode = String(value || '').trim().toLowerCase();
+      if (mode === 'device' || mode === 'manual' || mode === 'ip') {
+        return mode;
+      }
+      return 'ip';
+    }
+
+    function clearGeoPanelCache() {
+      safeStorageRemove(geoPanelCacheKey);
+    }
+
+    function setGeoPanelState(state) {
+      if (!geoPanelCard) {
+        return;
+      }
+      geoPanelCard.classList.remove('state-loading', 'state-error', 'state-ready');
+      geoPanelCard.classList.add(`state-${state}`);
+    }
+
+    function formatLatLon(value) {
+      if (typeof value !== 'number' || Number.isNaN(value)) {
+        return '—';
+      }
+      return value.toFixed(4);
+    }
+
+    function formatAccuracy(value) {
+      const numeric = Number(value);
+      if (!Number.isFinite(numeric) || numeric <= 0) {
+        return '—';
+      }
+      return `±${Math.round(numeric)}m`;
+    }
+
+    const PREF_CODE_TO_NAME = {
+      1: '北海道', 2: '青森県', 3: '岩手県', 4: '宮城県', 5: '秋田県', 6: '山形県', 7: '福島県',
+      8: '茨城県', 9: '栃木県', 10: '群馬県', 11: '埼玉県', 12: '千葉県', 13: '東京都', 14: '神奈川県',
+      15: '新潟県', 16: '富山県', 17: '石川県', 18: '福井県', 19: '山梨県', 20: '長野県',
+      21: '岐阜県', 22: '静岡県', 23: '愛知県', 24: '三重県', 25: '滋賀県', 26: '京都府', 27: '大阪府',
+      28: '兵庫県', 29: '奈良県', 30: '和歌山県', 31: '鳥取県', 32: '島根県', 33: '岡山県', 34: '広島県',
+      35: '山口県', 36: '徳島県', 37: '香川県', 38: '愛媛県', 39: '高知県', 40: '福岡県', 41: '佐賀県',
+      42: '長崎県', 43: '熊本県', 44: '大分県', 45: '宮崎県', 46: '鹿児島県', 47: '沖縄県'
+    };
+
+    const EAST_PREF_SET = new Set([
+      '北海道', '青森県', '岩手県', '宮城県', '秋田県', '山形県', '福島県',
+      '茨城県', '栃木県', '群馬県', '埼玉県', '千葉県', '東京都', '神奈川県',
+      '新潟県', '富山県', '石川県', '福井県', '山梨県', '長野県',
+      '岐阜県', '静岡県', '愛知県'
+    ]);
+
+    const WEST_PREF_SET = new Set(Object.values(PREF_CODE_TO_NAME).filter((name) => !EAST_PREF_SET.has(name)));
+
+    const PREF_EN_ALIAS = {
+      hokkaido: '北海道', aomori: '青森県', iwate: '岩手県', miyagi: '宮城県', akita: '秋田県', yamagata: '山形県', fukushima: '福島県',
+      ibaraki: '茨城県', tochigi: '栃木県', gunma: '群馬県', saitama: '埼玉県', chiba: '千葉県', tokyo: '東京都', kanagawa: '神奈川県',
+      niigata: '新潟県', toyama: '富山県', ishikawa: '石川県', fukui: '福井県', yamanashi: '山梨県', nagano: '長野県',
+      gifu: '岐阜県', shizuoka: '静岡県', aichi: '愛知県', mie: '三重県', shiga: '滋賀県', kyoto: '京都府', osaka: '大阪府',
+      hyogo: '兵庫県', nara: '奈良県', wakayama: '和歌山県', tottori: '鳥取県', shimane: '島根県', okayama: '岡山県', hiroshima: '広島県',
+      yamaguchi: '山口県', tokushima: '徳島県', kagawa: '香川県', ehime: '愛媛県', kochi: '高知県', fukuoka: '福岡県', saga: '佐賀県',
+      nagasaki: '長崎県', kumamoto: '熊本県', oita: '大分県', miyazaki: '宮崎県', kagoshima: '鹿児島県', okinawa: '沖縄県'
+    };
+
+    function normalizePrefName(value) {
+      const raw = String(value || '').trim();
+      if (!raw) {
+        return '';
+      }
+      const base = raw
+        .replace(/都道府県|都|道|府|県/g, '')
+        .replace(/\s+/g, '')
+        .toLowerCase();
+      if (PREF_EN_ALIAS[base]) {
+        return PREF_EN_ALIAS[base];
+      }
+      const entries = Object.values(PREF_CODE_TO_NAME);
+      for (let i = 0; i < entries.length; i += 1) {
+        const pref = entries[i];
+        const key = pref.replace(/都道府県|都|道|府|県/g, '').toLowerCase();
+        if (key === base || pref === raw) {
+          return pref;
+        }
+      }
+      return raw;
+    }
+
+    function updateDetailBreadcrumb() {
+      if (!geoBreadcrumb) {
+        return;
+      }
+      geoBreadcrumb.textContent = geoState.detailPath.join(' > ');
+      if (geoDetailTitle) {
+        if (geoState.detailLevel === 'world') {
+          geoDetailTitle.textContent = 'JAPAN';
+        } else if (geoState.detailLevel === 'country') {
+          geoDetailTitle.textContent = isJapanCountryName(geoState.selectedCountry || '') ? 'JAPAN' : (geoState.selectedCountry || 'COUNTRY');
+        } else if (geoState.detailLevel === 'east-west') {
+          geoDetailTitle.textContent = geoState.selectedRegionBand || 'JAPAN';
+        } else if (geoState.detailLevel === 'prefecture') {
+          geoDetailTitle.textContent = geoState.selectedPrefecture || 'JAPAN';
+        }
+      }
+    }
+
+    function pushDetailState(level, label) {
+      geoState.detailLevel = level;
+      const current = geoState.detailHistory[geoState.detailHistory.length - 1];
+      if (current !== level) {
+        geoState.detailHistory.push(level);
+      }
+      if (label) {
+        const lastLabel = geoState.detailPath[geoState.detailPath.length - 1];
+        if (lastLabel !== label) {
+          geoState.detailPath.push(label);
+        }
+      }
+      updateDetailBreadcrumb();
+    }
+
+    function resetDetailState() {
+      geoState.detailHistory = ['world'];
+      geoState.detailPath = ['世界'];
+      geoState.detailLevel = 'world';
+      geoState.selectedCountry = '';
+      geoState.selectedRegionBand = '';
+      geoState.selectedPrefecture = '';
+      geoState.selectedPrefCode = '';
+      updateDetailBreadcrumb();
+    }
+
+    function setupGeoVisibilityWatcher() {
+      if (!geoPanelCard || typeof IntersectionObserver !== 'function') {
+        return;
+      }
+      const observer = new IntersectionObserver((entries) => {
+        const entry = entries && entries[0];
+        geoState.panelVisible = !!(entry && entry.isIntersecting);
+        geoPanelCard.classList.toggle('paused', !geoState.panelVisible);
+      }, { threshold: 0.1 });
+      observer.observe(geoPanelCard);
+      document.addEventListener('visibilitychange', () => {
+        geoPanelCard.classList.toggle('paused', document.hidden || !geoState.panelVisible);
+      });
+    }
+
+    function projectWorldPoint(latitude, longitude) {
+      const width = 960;
+      const height = 460;
+      const x = ((longitude + 180) / 360) * width;
+      const y = ((90 - latitude) / 180) * height;
+      return { x, y };
+    }
+
+    function projectJapanPoint(latitude, longitude) {
+      const minLon = 122;
+      const maxLon = 154;
+      const minLat = 24;
+      const maxLat = 46;
+      if (longitude < minLon || longitude > maxLon || latitude < minLat || latitude > maxLat) {
+        return null;
+      }
+      const width = 960;
+      const height = 460;
+      const x = ((longitude - minLon) / (maxLon - minLon)) * width;
+      const y = ((maxLat - latitude) / (maxLat - minLat)) * height;
+      return { x, y };
+    }
+
+    function drawMapSvg(svgElement, features, projectionMode, options = {}) {
+      if (!svgElement || !Array.isArray(features)) {
+        return;
+      }
+      const pathParts = [];
+      const lineParts = [];
+
+      const project = projectionMode === 'japan' ? projectJapanPoint : projectWorldPoint;
+      const highlightPref = normalizePrefName(options.highlightPrefecture || '');
+      const regionBand = options.regionBand || '';
+
+      function ringToPath(ring) {
+        const points = [];
+        ring.forEach((coord) => {
+          const lon = Number(coord[0]);
+          const lat = Number(coord[1]);
+          if (!Number.isFinite(lon) || !Number.isFinite(lat)) {
+            return;
+          }
+          const p = project(lat, lon);
+          if (!p) {
+            return;
+          }
+          points.push(p);
+        });
+        if (points.length < 2) {
+          return '';
+        }
+        return `M${points[0].x.toFixed(2)},${points[0].y.toFixed(2)} ` + points.slice(1).map((p) => `L${p.x.toFixed(2)},${p.y.toFixed(2)}`).join(' ') + ' Z';
+      }
+
+      function geometryPath(geometry) {
+        if (!geometry) {
+          return '';
+        }
+        const segments = [];
+        if (geometry.type === 'Polygon') {
+          (geometry.coordinates || []).forEach((ring) => {
+            const d = ringToPath(ring);
+            if (d) {
+              segments.push(d);
+            }
+          });
+        } else if (geometry.type === 'MultiPolygon') {
+          (geometry.coordinates || []).forEach((poly) => {
+            (poly || []).forEach((ring) => {
+              const d = ringToPath(ring);
+              if (d) {
+                segments.push(d);
+              }
+            });
+          });
+        }
+        return segments.join(' ');
+      }
+
+      features.forEach((feature) => {
+        const geometry = feature && feature.geometry;
+        const d = geometryPath(geometry);
+        if (!d) {
+          return;
+        }
+
+        if (projectionMode === 'japan') {
+          const code = Number(feature.id);
+          const prefName = PREF_CODE_TO_NAME[code] || '';
+          const isEast = EAST_PREF_SET.has(prefName);
+          const inBand = regionBand ? ((regionBand === '東日本' && isEast) || (regionBand === '西日本' && WEST_PREF_SET.has(prefName))) : true;
+          const isHighlight = highlightPref && prefName === highlightPref;
+          const fillClass = isHighlight ? 'geo-map-land focus' : (inBand ? 'geo-map-land' : 'geo-map-land muted');
+          pathParts.push(`<path class="${fillClass}" data-pref-code="${code}" data-pref-name="${prefName}" d="${d}"></path>`);
+          lineParts.push(`<path class="geo-map-border" d="${d}"></path>`);
+        } else {
+          pathParts.push(`<path class="geo-map-land" d="${d}"></path>`);
+          lineParts.push(`<path class="geo-map-border" d="${d}"></path>`);
+        }
+      });
+
+      const width = 960;
+      const height = 460;
+      const graticules = [
+        `<path class="geo-map-grid" d="M0 ${height / 2} L${width} ${height / 2}"></path>`,
+        `<path class="geo-map-grid" d="M${width / 4} 0 L${width / 4} ${height}"></path>`,
+        `<path class="geo-map-grid" d="M${width / 2} 0 L${width / 2} ${height}"></path>`,
+        `<path class="geo-map-grid" d="M${(width * 3) / 4} 0 L${(width * 3) / 4} ${height}"></path>`,
+      ];
+
+      const labels = projectionMode === 'world'
+        ? [
+            { name: 'Tokyo', lat: 35.68, lon: 139.76 },
+            { name: 'London', lat: 51.51, lon: -0.13 },
+            { name: 'New York', lat: 40.71, lon: -74.0 },
+            { name: 'Sydney', lat: -33.86, lon: 151.21 },
+          ]
+        : [
+            { name: '札幌', lat: 43.06, lon: 141.35 },
+            { name: '東京', lat: 35.68, lon: 139.76 },
+            { name: '名古屋', lat: 35.18, lon: 136.91 },
+            { name: '大阪', lat: 34.69, lon: 135.50 },
+            { name: '福岡', lat: 33.59, lon: 130.40 },
+          ];
+      const labelMarkup = labels
+        .map((item) => {
+          const p = project(item.lat, item.lon);
+          if (!p) {
+            return '';
+          }
+          return `<text class="geo-map-city" x="${p.x.toFixed(1)}" y="${(p.y - 4).toFixed(1)}">${item.name}</text>`;
+        })
+        .join('');
+
+      svgElement.innerHTML = [
+        '<rect class="geo-map-sea" x="0" y="0" width="960" height="460"></rect>',
+        ...graticules,
+        ...pathParts,
+        ...lineParts,
+        labelMarkup,
+      ].join('');
+    }
+
+    function applyJapanViewBox(level, prefCode = '') {
+      if (!japanMapSvg) {
+        return;
+      }
+      japanMapSvg.style.transition = 'all 220ms ease';
+      if (level === 'world' || level === 'country') {
+        japanMapSvg.setAttribute('viewBox', '0 0 960 460');
+        return;
+      }
+      if (level === 'east-west') {
+        if (geoState.selectedRegionBand === '東日本') {
+          japanMapSvg.setAttribute('viewBox', '380 20 560 380');
+        } else if (geoState.selectedRegionBand === '西日本') {
+          japanMapSvg.setAttribute('viewBox', '120 80 620 340');
+        } else {
+          japanMapSvg.setAttribute('viewBox', '0 0 960 460');
+        }
+        return;
+      }
+      if (level === 'prefecture') {
+        const node = japanMapSvg.querySelector(`[data-pref-code="${prefCode}"]`);
+        if (node && typeof node.getBBox === 'function') {
+          const box = node.getBBox();
+          const padX = Math.max(40, box.width * 0.8);
+          const padY = Math.max(30, box.height * 0.8);
+          const x = Math.max(0, box.x - padX);
+          const y = Math.max(0, box.y - padY);
+          const w = Math.min(960 - x, box.width + (padX * 2));
+          const h = Math.min(460 - y, box.height + (padY * 2));
+          japanMapSvg.setAttribute('viewBox', `${x.toFixed(1)} ${y.toFixed(1)} ${Math.max(120, w).toFixed(1)} ${Math.max(90, h).toFixed(1)}`);
+          return;
+        }
+      }
+      japanMapSvg.setAttribute('viewBox', '0 0 960 460');
+    }
+
+    function renderDetailMap() {
+      if (!geoState.japanReady) {
         return;
       }
 
+      if (geoState.selectedCountry && geoState.selectedCountry !== 'Japan') {
+        drawMapSvg(japanMapSvg, geoState.worldFeatures, 'world');
+        applyJapanViewBox('country');
+        japanMapOutside.classList.add('show');
+        return;
+      }
+
+      drawMapSvg(japanMapSvg, geoState.japanFeatures, 'japan', {
+        regionBand: geoState.detailLevel === 'east-west' ? geoState.selectedRegionBand : '',
+        highlightPrefecture: geoState.selectedPrefecture,
+      });
+      applyJapanViewBox(geoState.detailLevel, geoState.selectedPrefCode);
+      japanMapOutside.classList.remove('show');
+    }
+
+    function isJapanCountryName(country) {
+      const value = String(country || '').trim().toLowerCase();
+      return value === 'japan' || value === '日本';
+    }
+
+    function resolveRegionBandFromPref(prefName) {
+      const normalized = normalizePrefName(prefName);
+      if (!normalized) {
+        return '';
+      }
+      if (EAST_PREF_SET.has(normalized)) {
+        return '東日本';
+      }
+      if (WEST_PREF_SET.has(normalized)) {
+        return '西日本';
+      }
+      return '';
+    }
+
+    async function initializeGeoMaps() {
+      if (geoState.worldReady && geoState.japanReady) {
+        return;
+      }
+      try {
+        const [worldRes, japanRes] = await Promise.all([
+          fetch('/site/maps/world-110m.topojson'),
+          fetch('/site/maps/japan.topojson'),
+        ]);
+        const worldTopo = await worldRes.json();
+        const japanTopo = await japanRes.json();
+        const worldFeatures = window.topojson.feature(worldTopo, worldTopo.objects.countries).features;
+        const japanFeatures = window.topojson.feature(japanTopo, japanTopo.objects.japan).features;
+        geoState.worldFeatures = worldFeatures;
+        geoState.japanFeatures = japanFeatures;
+        drawMapSvg(worldMapSvg, worldFeatures, 'world');
+        drawMapSvg(japanMapSvg, japanFeatures, 'japan');
+        geoState.worldReady = true;
+        geoState.japanReady = true;
+        resetDetailState();
+        updateDetailBreadcrumb();
+      } catch (e) {
+        geoStatus.textContent = '地図データを読み込めませんでした。';
+      }
+    }
+
+    function attachGeoMapInteractions() {
+      if (worldMapMarker) {
+        worldMapMarker.addEventListener('click', () => {
+          if (!geoState.targetCoord) {
+            return;
+          }
+          const selectedCountry = geoState.selectedCountry || '';
+          if (!selectedCountry) {
+            return;
+          }
+          if (isJapanCountryName(selectedCountry)) {
+            geoState.detailLevel = 'country';
+            pushDetailState('country', '日本');
+            const band = geoState.selectedRegionBand || resolveRegionBandFromPref(geoState.selectedPrefecture);
+            if (band) {
+              geoState.selectedRegionBand = band;
+              pushDetailState('east-west', band);
+            }
+          } else {
+            geoState.detailLevel = 'country';
+            pushDetailState('country', selectedCountry);
+          }
+          renderDetailMap();
+          if (geoState.targetCoord) {
+            setGeoMapMarkers(geoState.targetCoord.latitude, geoState.targetCoord.longitude, japanMapLabel.textContent);
+          }
+        });
+      }
+
+      if (japanMapSvg) {
+        japanMapSvg.addEventListener('click', (event) => {
+          const target = event.target;
+          if (!target || typeof target.getAttribute !== 'function') {
+            return;
+          }
+          const prefCode = target.getAttribute('data-pref-code');
+          const prefName = target.getAttribute('data-pref-name');
+          if (!prefCode || !prefName || !isJapanCountryName(geoState.selectedCountry || '')) {
+            return;
+          }
+          const band = resolveRegionBandFromPref(prefName);
+          if (band) {
+            geoState.selectedRegionBand = band;
+            if (geoState.detailLevel !== 'east-west') {
+              pushDetailState('east-west', band);
+            }
+          }
+          geoState.selectedPrefecture = prefName;
+          geoState.selectedPrefCode = prefCode;
+          pushDetailState('prefecture', prefName);
+          renderDetailMap();
+          if (geoState.targetCoord) {
+            setGeoMapMarkers(geoState.targetCoord.latitude, geoState.targetCoord.longitude, japanMapLabel.textContent);
+          }
+        });
+      }
+    }
+
+    function setMapMarker(marker, wave, label, projectedPoint, labelText, hide = false) {
+      if (!marker || !wave || !label) {
+        return;
+      }
+      if (hide || !projectedPoint) {
+        marker.classList.add('hidden');
+        wave.classList.add('hidden');
+        label.textContent = labelText || '—';
+        return;
+      }
+      marker.classList.remove('hidden');
+      wave.classList.remove('hidden');
+      const frame = marker.parentElement;
+      const frameWidth = frame ? (frame.clientWidth || 960) : 960;
+      const frameHeight = frame ? (frame.clientHeight || 460) : 460;
+      const left = (projectedPoint.x / 960) * frameWidth;
+      const top = (projectedPoint.y / 460) * frameHeight;
+      marker.style.left = `${left}px`;
+      marker.style.top = `${top}px`;
+      wave.style.left = `${left}px`;
+      wave.style.top = `${top}px`;
+      label.textContent = labelText || '—';
+    }
+
+    function setGeoMapMarkers(latitude, longitude, labelText) {
+      if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+        setMapMarker(worldMapMarker, worldMapWave, worldMapLabel, null, '座標なし', true);
+        setMapMarker(japanMapMarker, japanMapWave, japanMapLabel, null, '座標なし', true);
+        japanMapOutside.classList.remove('show');
+        return;
+      }
+
+      const worldPoint = projectWorldPoint(latitude, longitude);
+      const japanPoint = projectJapanPoint(latitude, longitude);
+      setMapMarker(worldMapMarker, worldMapWave, worldMapLabel, worldPoint, labelText || `${formatLatLon(latitude)}, ${formatLatLon(longitude)}`);
+
+      if (!japanPoint) {
+        setMapMarker(japanMapMarker, japanMapWave, japanMapLabel, null, '日本国外', true);
+        japanMapOutside.classList.add('show');
+      } else {
+        japanMapOutside.classList.remove('show');
+        setMapMarker(japanMapMarker, japanMapWave, japanMapLabel, japanPoint, labelText || `${formatLatLon(latitude)}, ${formatLatLon(longitude)}`);
+      }
+    }
+
+    function buildGeoRequestKey(params) {
+      const keys = Object.keys(params || {}).sort();
+      return keys.map((key) => `${key}:${params[key]}`).join('|');
+    }
+
+    function renderGeoPanel(payload, requestMode = geoState.mode) {
+      const location = getPathValue(payload, ['location'], {});
+      const weather = getPathValue(payload, ['weather'], {});
+      const status = getPathValue(payload, ['status'], 'error');
+      const mode = normalizeMode(location.mode || requestMode);
+
+      const latitude = Number(location.latitude);
+      const longitude = Number(location.longitude);
+      const hasCoord = Number.isFinite(latitude) && Number.isFinite(longitude);
+      geoState.targetCoord = hasCoord ? { latitude, longitude } : null;
+      geoState.selectedCountry = String(location.country || '').trim();
+
+      const prefCandidate = normalizePrefName(location.region || location.city || '');
+      geoState.selectedPrefecture = prefCandidate;
+      geoState.selectedPrefCode = String(
+        Object.keys(PREF_CODE_TO_NAME).find((code) => PREF_CODE_TO_NAME[Number(code)] === prefCandidate) || ''
+      );
+      geoState.selectedRegionBand = resolveRegionBandFromPref(prefCandidate);
+
+      setGeoMapMarkers(
+        hasCoord ? latitude : NaN,
+        hasCoord ? longitude : NaN,
+        `${location.region || location.city || location.country || '地点不明'}`
+      );
+      renderDetailMap();
+
+      geoLocationLabel.textContent = location.label || '地点: —';
+      const formalAddress = [location.city, location.region, location.country].filter((item) => item && item !== '—').join(', ') || '—';
+      geoLocationMeta.textContent = `地域: ${location.region || location.city || '—'} / 国: ${location.country || '—'} / 住所: ${formalAddress}`;
+      geoLatLon.textContent = `緯度: ${formatLatLon(location.latitude)} / 経度: ${formatLatLon(location.longitude)}`;
+      geoProvider.textContent = `取得元: ${mode === 'device' ? '端末位置' : mode === 'manual' ? '手動' : 'IP推定'} / ${location.provider || '—'}`;
+      geoAccuracy.textContent = `精度: ${formatAccuracy(location.accuracy_m)}`;
+      geoTimezone.textContent = weather.timezone || '—';
+      geoLocalTime.textContent = weather.local_time || '—';
+      geoWeather.textContent = weather.weather || '—';
+      geoTemp.textContent = weather.current_temp || '—';
+      geoHumidity.textContent = weather.humidity || '—';
+      geoWind.textContent = `${weather.wind_speed || '—'} / ${weather.wind_direction || '—'}`;
+      geoObservedAt.textContent = weather.observed_at || '—';
+      geoHiLo.textContent = `${weather.high_temp || '—'} / ${weather.low_temp || '—'}`;
+      geoRain.textContent = weather.precipitation || '—';
+      geoStatus.textContent = payload.message || (status === 'ready' ? '表示中' : '取得に失敗しました。チャットは利用可能です。');
+
+      if (mode === 'manual') {
+        const manualLabel = location.region || location.city || location.country || '未設定';
+        const representative = geoState.manualResolvedAddress && geoState.manualResolvedAddress.includes('代表地点') ? '（代表地点）' : '';
+        locationInput.value = `手動: ${manualLabel}${representative}`;
+      } else if (mode === 'device') {
+        locationInput.value = `端末位置: ${location.region || location.city || location.country || '現在地'}`;
+      } else {
+        locationInput.value = `IP推定: ${location.region || location.city || location.country || '不明'}`;
+      }
+      persistCurrentLocation(locationInput.value.trim());
+
+      if (status === 'ready') {
+        setGeoPanelState('ready');
+      } else if (status === 'location_failed') {
+        setGeoPanelState('error');
+      } else {
+        setGeoPanelState('loading');
+      }
+    }
+
+    function readGeoPanelCache() {
+      const raw = safeStorageGet(geoPanelCacheKey);
+      if (!raw) {
+        return null;
+      }
+      try {
+        const parsed = JSON.parse(raw);
+        if (!parsed || typeof parsed !== 'object') {
+          return null;
+        }
+        const expiresAt = Number(parsed.expires_at || 0);
+        if (expiresAt <= Date.now()) {
+          return null;
+        }
+        if ((parsed.request_key || '') !== (geoState.requestKey || '')) {
+          return null;
+        }
+        return parsed.payload || null;
+      } catch (e) {
+        return null;
+      }
+    }
+
+    function writeGeoPanelCache(payload, ttlSec) {
+      const ttl = Math.max(60, Number(ttlSec || 1800));
+      safeStorageSet(
+        geoPanelCacheKey,
+        JSON.stringify({
+          request_key: geoState.requestKey || '',
+          payload,
+          expires_at: Date.now() + (ttl * 1000),
+        })
+      );
+    }
+
+    function geolocationErrorMessage(error) {
+      if (!error || typeof error !== 'object') {
+        return '位置情報を取得できませんでした。';
+      }
+      if (error.code === 1) {
+        return '位置情報の利用が拒否されました。';
+      }
+      if (error.code === 2) {
+        return '位置情報を取得できませんでした。電波やネットワークを確認してください。';
+      }
+      if (error.code === 3) {
+        return '位置情報の取得がタイムアウトしました。';
+      }
+      return error.message || '位置情報を取得できませんでした。';
+    }
+
+    async function reverseGeocodeByCoords(latitude, longitude) {
+      const url = new URL('https://geocoding-api.open-meteo.com/v1/reverse');
+      url.searchParams.set('latitude', String(latitude));
+      url.searchParams.set('longitude', String(longitude));
+      url.searchParams.set('language', 'ja');
+      url.searchParams.set('count', '1');
+      url.searchParams.set('format', 'json');
+
+      const response = await fetch(url.toString());
+      const data = await response.json();
+      const result = (data.results && data.results[0]) || {};
+      return {
+        city: result.name || '',
+        region: result.admin1 || result.admin2 || '',
+        country: result.country || '',
+      };
+    }
+
+    async function geocodeManualRegion(regionName) {
+      const text = String(regionName || '').trim();
+      if (!text) {
+        return [];
+      }
+      const url = new URL('https://geocoding-api.open-meteo.com/v1/search');
+      url.searchParams.set('name', text);
+      url.searchParams.set('count', '6');
+      url.searchParams.set('language', 'ja');
+      url.searchParams.set('format', 'json');
+
+      const response = await fetch(url.toString());
+      const data = await response.json();
+      const results = Array.isArray(data.results) ? data.results : [];
+      return results.map((result) => {
+        const city = result.name || text;
+        const region = result.admin1 || result.admin2 || '';
+        const country = result.country || '';
+        const addressParts = [city, region, country].filter(Boolean);
+        const featureCode = String(result.feature_code || '').toUpperCase();
+        const isRepresentative = featureCode === 'ADM3' || featureCode === 'ADM2' || featureCode === 'ADM1';
+        return {
+          city,
+          region,
+          country,
+          latitude: Number(result.latitude),
+          longitude: Number(result.longitude),
+          address: addressParts.join(', '),
+          representative: isRepresentative,
+        };
+      });
+    }
+
+    function renderManualCandidates(candidates) {
+      if (!geoManualCandidates) {
+        return;
+      }
+      geoManualCandidates.innerHTML = '';
+      if (!Array.isArray(candidates) || candidates.length === 0) {
+        return;
+      }
+      const title = document.createElement('div');
+      title.className = 'geo-meta';
+      title.textContent = '候補を選択してください（自動確定しません）';
+      geoManualCandidates.appendChild(title);
+
+      candidates.forEach((candidate, index) => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'geo-manual-candidate';
+        const name = candidate.city || '名称不明';
+        const address = candidate.address || [candidate.region, candidate.country].filter(Boolean).join(', ') || '住所不明';
+        const representative = candidate.representative ? '（代表地点）' : '';
+        button.innerHTML = `${escapeHtml(name)}${representative}<small>${escapeHtml(address)}</small>`;
+        button.addEventListener('click', async () => {
+          await confirmManualCandidate(index);
+        });
+        geoManualCandidates.appendChild(button);
+      });
+    }
+
+    async function confirmManualCandidate(index) {
+      const candidate = Array.isArray(geoState.manualCandidates) ? geoState.manualCandidates[index] : null;
+      if (!candidate) {
+        return;
+      }
+      geoState.manualDetails = {
+        city: candidate.city || '',
+        region: candidate.region || '',
+        country: candidate.country || '',
+        latitude: Number(candidate.latitude),
+        longitude: Number(candidate.longitude),
+      };
+      geoState.manualResolvedAddress = `${candidate.address || ''}${candidate.representative ? '（代表地点）' : ''}`;
+      geoState.manualLock = true;
+      geoState.mode = 'manual';
+      persistGeoMode('manual');
+      if (geoSourceSelect) {
+        geoSourceSelect.value = 'manual';
+      }
+      geoManualCandidates.innerHTML = '';
+      clearGeoPanelCache();
+      await refreshGeoPanel(true, 'manual');
+    }
+
+    function buildGeoQuery(mode, reasonText = '') {
+      const selectedMode = normalizeMode(mode || geoState.mode);
+      const query = { source: selectedMode };
+
+      if (selectedMode === 'device' && geoState.device) {
+        query.lat = String(geoState.device.latitude);
+        query.lon = String(geoState.device.longitude);
+        query.accuracy = String(geoState.device.accuracy || '');
+        query.city = geoState.device.city || '';
+        query.region = geoState.device.region || '';
+        query.country = geoState.device.country || '';
+        query.provider = 'browser_geolocation';
+      }
+
+      if (selectedMode === 'manual') {
+        query.manual = geoState.manual || '';
+        if (geoState.manualDetails) {
+          query.lat = String(geoState.manualDetails.latitude);
+          query.lon = String(geoState.manualDetails.longitude);
+          query.city = geoState.manualDetails.city || '';
+          query.region = geoState.manualDetails.region || '';
+          query.country = geoState.manualDetails.country || '';
+          query.provider = 'manual_geocode';
+        }
+      }
+
+      if (selectedMode === 'ip' && reasonText) {
+        query.reason = reasonText;
+      }
+
+      return query;
+    }
+
+    async function refreshGeoPanel(force = false, mode = geoState.mode, reasonText = '') {
+      const normalizedMode = normalizeMode(mode || geoState.mode);
+      if (geoState.manualLock && normalizedMode !== 'manual') {
+        return;
+      }
+      await initializeGeoMaps();
+      const requestSeq = (geoState.requestSeq || 0) + 1;
+      geoState.requestSeq = requestSeq;
+      const query = buildGeoQuery(normalizedMode, reasonText);
+      geoState.requestKey = buildGeoRequestKey(query);
+      if (!force) {
+        const cached = readGeoPanelCache();
+        if (cached) {
+          if (requestSeq < geoState.requestSeq) {
+            return;
+          }
+          geoState.appliedSeq = requestSeq;
+          renderGeoPanel(cached, normalizedMode);
+          return;
+        }
+      }
+
+      setGeoPanelState('loading');
+      geoStatus.textContent = '取得中...';
+      try {
+        const url = new URL('/panel/location-weather', window.location.origin);
+        Object.entries(query).forEach(([key, value]) => {
+          if (value != null && String(value).trim() !== '') {
+            url.searchParams.set(key, String(value));
+          }
+        });
+
+        const res = await fetch(url.toString());
+        const data = await res.json();
+        if (requestSeq < geoState.requestSeq) {
+          return;
+        }
+        geoState.appliedSeq = requestSeq;
+        renderGeoPanel(data || {}, normalizedMode);
+        writeGeoPanelCache(data || {}, Number(getPathValue(data, ['next_refresh_sec'], 1800)));
+        appendRuntimeLog(`location ${normalizeMode(normalizedMode)}: ${getPathValue(data, ['location', 'region'], '—') || '—'}`);
+      } catch (e) {
+        if (requestSeq < geoState.requestSeq) {
+          return;
+        }
+        geoState.appliedSeq = requestSeq;
+        renderGeoPanel({
+          status: 'location_failed',
+          message: '取得に失敗しました。チャットは利用可能です。',
+          location: { label: '現在地: 取得失敗', city: '—', region: '—', country: '—', latitude: null, longitude: null, provider: '—', mode: normalizedMode },
+          weather: { weather: '—', current_temp: '—', high_temp: '—', low_temp: '—', precipitation: '—' },
+        }, normalizedMode);
+        appendRuntimeLog(`location ${normalizeMode(normalizedMode)}: failed`);
+      }
+    }
+
+    async function applyManualLocation() {
+      const manual = (geoManualInput.value || '').trim();
+      geoState.manual = manual;
+      persistManualRegion(manual);
+      geoState.mode = 'manual';
+      geoState.manualLock = true;
+      persistGeoMode('manual');
+      if (geoSourceSelect) {
+        geoSourceSelect.value = 'manual';
+      }
+      geoState.manualDetails = null;
+      geoState.manualResolvedAddress = '';
+      geoState.manualCandidates = [];
+      if (geoManualCandidates) {
+        geoManualCandidates.innerHTML = '';
+      }
+
+      if (!manual) {
+        geoStatus.textContent = '手動地点を入力してください。';
+        setGeoMapMarkers(NaN, NaN, '座標未確定');
+        return;
+      }
+
+      try {
+        const candidates = await geocodeManualRegion(manual);
+        geoState.manualCandidates = candidates;
+        if (!candidates.length) {
+          geoStatus.textContent = '候補が見つかりません。入力を修正してください。';
+          setGeoMapMarkers(NaN, NaN, '座標未確定');
+          renderManualCandidates([]);
+          return;
+        }
+        if (candidates.length === 1) {
+          await confirmManualCandidate(0);
+          geoStatus.textContent = '手動地点を確定しました。';
+          return;
+        }
+        renderManualCandidates(candidates);
+        geoStatus.textContent = '候補から地点を選択してください。';
+        setGeoMapMarkers(NaN, NaN, '座標未確定');
+        return;
+      } catch (e) {
+        geoState.manualDetails = null;
+        geoState.manualCandidates = [];
+        geoStatus.textContent = '手動地点の検索に失敗しました。';
+        setGeoMapMarkers(NaN, NaN, '座標未確定');
+        return;
+      }
+    }
+
+    async function requestDeviceLocation() {
+      geoState.manualLock = false;
+      if (!navigator.geolocation) {
+        const reason = 'このブラウザは位置情報APIに対応していません。IP推定に切り替えます。';
+        geoState.mode = 'ip';
+        persistGeoMode('ip');
+        if (geoSourceSelect) {
+          geoSourceSelect.value = 'ip';
+        }
+        clearGeoPanelCache();
+        await refreshGeoPanel(true, 'ip', reason);
+        appendRuntimeLog('device location unsupported -> ip');
+        return;
+      }
+
+      if (!window.isSecureContext && window.location.hostname !== 'localhost') {
+        const reason = 'この接続（LAN内HTTP）は位置情報取得が制限される場合があります。IP推定に切り替えます。';
+        geoState.mode = 'ip';
+        persistGeoMode('ip');
+        if (geoSourceSelect) {
+          geoSourceSelect.value = 'ip';
+        }
+        clearGeoPanelCache();
+        await refreshGeoPanel(true, 'ip', reason);
+        appendRuntimeLog('device location blocked on insecure context -> ip');
+        return;
+      }
+
+      setGeoPanelState('loading');
+      geoStatus.textContent = '端末位置を取得中...';
       navigator.geolocation.getCurrentPosition(
-        (position) => {
-          const latitude = Number(position.coords.latitude || 0).toFixed(6);
-          const longitude = Number(position.coords.longitude || 0).toFixed(6);
-          const label = `緯度${latitude} 経度${longitude}`;
-          locationInput.value = label;
-          persistCurrentLocation(label);
+        async (position) => {
+          const latitude = Number(position.coords.latitude);
+          const longitude = Number(position.coords.longitude);
+          const accuracy = Number(position.coords.accuracy);
+          const place = { city: '', region: '', country: '' };
+          try {
+            const resolved = await reverseGeocodeByCoords(latitude, longitude);
+            place.city = resolved.city || '';
+            place.region = resolved.region || '';
+            place.country = resolved.country || '';
+          } catch (e) {
+          }
+
+          geoState.device = {
+            latitude,
+            longitude,
+            accuracy,
+            city: place.city,
+            region: place.region,
+            country: place.country,
+          };
+          geoState.mode = 'device';
+          persistGeoMode('device');
+          if (geoSourceSelect) {
+            geoSourceSelect.value = 'device';
+          }
+
+          clearGeoPanelCache();
+          await refreshGeoPanel(true, 'device');
+          appendRuntimeLog('device location: success');
         },
-        () => {
+        async (error) => {
+          if (geoState.manualLock) {
+            geoStatus.textContent = geolocationErrorMessage(error);
+            return;
+          }
+          const reason = `${geolocationErrorMessage(error)} LAN内HTTPではブラウザ制限で失敗することがあります。`;
+          geoState.mode = 'ip';
+          persistGeoMode('ip');
+          if (geoSourceSelect) {
+            geoSourceSelect.value = 'ip';
+          }
+          clearGeoPanelCache();
+          await refreshGeoPanel(true, 'ip', reason);
+          appendRuntimeLog('device location denied/failed -> ip');
         },
-        { enableHighAccuracy: true, timeout: 5000, maximumAge: 60000 }
+        { enableHighAccuracy: true, timeout: 7000, maximumAge: 30000 }
       );
     }
 
@@ -2241,7 +4453,57 @@ HTML_PAGE = """<!doctype html>
     function addBubble(role, text) {
       const el = document.createElement('div');
       el.className = `bubble ${role}`;
-      el.innerHTML = linkifyText(text).split(String.fromCharCode(10)).join('<br>');
+      const rawText = String(text || '');
+
+      const copyIconSvg = [
+        '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">',
+        '<rect x="9" y="9" width="11" height="11" rx="2"></rect>',
+        '<rect x="4" y="4" width="11" height="11" rx="2"></rect>',
+        '</svg>',
+      ].join('');
+      const copiedIconSvg = [
+        '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">',
+        '<path d="M5 12.5l4.2 4.2L19 7.5"></path>',
+        '</svg>',
+      ].join('');
+
+      if (role === 'user' || role === 'assistant') {
+        const head = document.createElement('div');
+        head.className = 'bubble-head';
+        const copyBtn = document.createElement('button');
+        copyBtn.type = 'button';
+        copyBtn.className = 'bubble-copy-btn';
+        copyBtn.innerHTML = copyIconSvg;
+        copyBtn.setAttribute('aria-label', '全文をコピー');
+        copyBtn.setAttribute('title', '全文をコピー');
+        copyBtn.addEventListener('click', async () => {
+          try {
+            if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+              await navigator.clipboard.writeText(rawText);
+            } else {
+              const area = document.createElement('textarea');
+              area.value = rawText;
+              document.body.appendChild(area);
+              area.select();
+              document.execCommand('copy');
+              document.body.removeChild(area);
+            }
+            copyBtn.classList.add('is-copied');
+            copyBtn.innerHTML = copiedIconSvg;
+            setTimeout(() => {
+              copyBtn.classList.remove('is-copied');
+              copyBtn.innerHTML = copyIconSvg;
+            }, 1500);
+          } catch (e) {
+          }
+        });
+        head.appendChild(copyBtn);
+        el.appendChild(head);
+      }
+
+      const body = document.createElement('div');
+      body.innerHTML = linkifyText(rawText).split(String.fromCharCode(10)).join('<br>');
+      el.appendChild(body);
       chatLog.appendChild(el);
       chatLog.scrollTop = chatLog.scrollHeight;
       return el;
@@ -2258,6 +4520,10 @@ HTML_PAGE = """<!doctype html>
       const apiLabel = evaluation.api_called ? 'あり' : 'なし';
       const savedCost = Number(evaluation.saved_cost_yen || 0).toFixed(4);
       const reductionRate = Number(evaluation.cloud_api_call_reduction_rate || evaluation.api_reduction_rate || 0).toFixed(1);
+      runtimeRoute.textContent = route || '—';
+      runtimeLatency.textContent = `${responseTime}秒`;
+      runtimeCloud.textContent = evaluation.api_called ? '使用あり' : '未使用';
+      appendRuntimeLog(`route=${route} / ${responseTime}秒 / cloud=${evaluation.api_called ? 'on' : 'off'}`);
       const lines = [
         `処理経路：${route}`,
         `応答時間：${responseTime}秒`,
@@ -2694,6 +4960,7 @@ HTML_PAGE = """<!doctype html>
       const newline = String.fromCharCode(10);
       serverUrlChip.textContent = `url: ${firstUrl}`;
       serverIpChip.textContent = `ip: ${localIp}`;
+      runtimeModel.textContent = modelName || '—';
       metaCard.textContent = `PCのURL: ${firstUrl}` + newline + `ローカルIP: ${localIp}` + newline + `Ollama: ${modelName}` + newline;
     }
 
@@ -2703,8 +4970,11 @@ HTML_PAGE = """<!doctype html>
         const data = await res.json();
         const modelName = getPathValue(data, ['ollama', 'model_configured'], data.model || 'unknown');
         setStatus(`health: ${data.status} | model: ${modelName}`);
+        runtimeConnection.textContent = data.status || '—';
+        runtimeModel.textContent = modelName || '—';
       } catch (e) {
         setStatus('health: offline');
+        runtimeConnection.textContent = 'offline';
       }
     }
 
@@ -2780,6 +5050,7 @@ HTML_PAGE = """<!doctype html>
 
       isSending = true;
       sendBtn.disabled = true;
+      runtimeProcessing.textContent = '処理中';
       addBubble('user', text);
       messageInput.value = '';
 
@@ -2796,6 +5067,7 @@ HTML_PAGE = """<!doctype html>
         if (data.ok) {
           addBubble('assistant', data.response);
           showEvaluation(data.evaluation);
+          appendRuntimeLog(`message ok: ${text.slice(0, 36)}`);
           if (data.ui) {
             if (data.ui.type === 'prompt_input') {
               addPromptInputPanel(data.ui);
@@ -2807,13 +5079,16 @@ HTML_PAGE = """<!doctype html>
         } else {
           addBubble('assistant', data.error || 'error');
           showEvaluation(data.evaluation);
+          appendRuntimeLog(`message error: ${String(data.error || 'error').slice(0, 36)}`);
         }
       } catch (e) {
         typing.remove();
         const detail = e && e.message ? ` (${e.message})` : '';
         addBubble('assistant', `通信に失敗しました。${detail}`);
+        appendRuntimeLog(`network error${detail}`);
       } finally {
         isSending = false;
+        runtimeProcessing.textContent = '待機中';
 
         if (queuedMessage) {
           const nextText = queuedMessage;
@@ -2841,6 +5116,66 @@ HTML_PAGE = """<!doctype html>
     documentSaveBtn.addEventListener('click', saveDocument);
     documentDeleteBtn.addEventListener('click', deleteDocument);
     documentClearBtn.addEventListener('click', clearDocumentSelection);
+    geoFetchBtn.addEventListener('click', () => {
+      requestDeviceLocation();
+    });
+    geoManualApplyBtn.addEventListener('click', () => {
+      applyManualLocation();
+    });
+    geoManualInput.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        applyManualLocation();
+      }
+    });
+    geoSourceSelect.addEventListener('change', async () => {
+      const mode = normalizeMode(geoSourceSelect.value);
+      geoState.mode = mode;
+      if (mode !== 'manual') {
+        geoState.manualLock = false;
+      }
+      persistGeoMode(mode);
+
+      if (mode === 'device') {
+        await requestDeviceLocation();
+        return;
+      }
+
+      if (mode === 'manual') {
+        await applyManualLocation();
+        return;
+      }
+
+      clearGeoPanelCache();
+      await refreshGeoPanel(true, 'ip');
+    });
+    geoNavBackBtn.addEventListener('click', () => {
+      if (geoState.detailHistory.length <= 1 || geoState.detailPath.length <= 1) {
+        return;
+      }
+      geoState.detailHistory.pop();
+      geoState.detailPath.pop();
+      geoState.detailLevel = geoState.detailHistory[geoState.detailHistory.length - 1] || 'world';
+      if (geoState.detailLevel !== 'prefecture') {
+        geoState.selectedPrefecture = '';
+        geoState.selectedPrefCode = '';
+      }
+      if (geoState.detailLevel === 'country') {
+        geoState.selectedRegionBand = '';
+      }
+      updateDetailBreadcrumb();
+      renderDetailMap();
+      if (geoState.targetCoord) {
+        setGeoMapMarkers(geoState.targetCoord.latitude, geoState.targetCoord.longitude, japanMapLabel.textContent);
+      }
+    });
+    geoNavHomeBtn.addEventListener('click', () => {
+      resetDetailState();
+      renderDetailMap();
+      if (geoState.targetCoord) {
+        setGeoMapMarkers(geoState.targetCoord.latitude, geoState.targetCoord.longitude, japanMapLabel.textContent);
+      }
+    });
     document.querySelectorAll('.quick-prompt').forEach((button) => {
       button.addEventListener('click', () => {
         messageInput.value = button.dataset.text || '';
@@ -2873,16 +5208,34 @@ HTML_PAGE = """<!doctype html>
       persistCurrentLocation(locationInput.value.trim());
     });
 
+    setupGeoVisibilityWatcher();
+    initializeGeoMaps();
+    attachGeoMapInteractions();
+
     addBubble('system', 'local-only server ready');
-    refreshBrowserLocation();
+    runtimeProcessing.textContent = '待機中';
+    runtimeConnection.textContent = '—';
+    runtimeRoute.textContent = '—';
+    runtimeLatency.textContent = '—';
+    runtimeCloud.textContent = '—';
+    refreshTokyoClock();
+    setInterval(refreshTokyoClock, 1000);
     refreshMeta();
     refreshHealth();
     refreshStorage();
     refreshCapabilities();
+    if (geoState.mode === 'device') {
+      requestDeviceLocation();
+    } else if (geoState.mode === 'manual' && geoState.manual) {
+      applyManualLocation();
+    } else {
+      refreshGeoPanel(false, 'ip');
+    }
     refreshDocuments();
     setInterval(refreshHealth, 10000);
     setInterval(refreshMeta, 60000);
     setInterval(refreshStorage, 30000);
+    setInterval(() => refreshGeoPanel(true, geoState.mode), 30 * 60 * 1000);
     setInterval(() => refreshDocuments(), 30000);
     messageInput.focus();
   </script>
@@ -2925,6 +5278,22 @@ class LocalAIServerHandler(BaseHTTPRequestHandler):
     self.end_headers()
     self.wfile.write(body)
 
+  def _send_file(self, file_path: str) -> None:
+    if not os.path.isfile(file_path):
+      self._send_json({"ok": False, "error": "not found"}, status=404)
+      return
+
+    with open(file_path, "rb") as file:
+      body = file.read()
+
+    content_type = mimetypes.guess_type(file_path)[0] or "application/octet-stream"
+    self.send_response(200)
+    self.send_header("Content-Type", content_type)
+    self.send_header("Content-Length", str(len(body)))
+    self.send_header("Cache-Control", "public, max-age=3600")
+    self.end_headers()
+    self.wfile.write(body)
+
   def _send_sse_headers(self) -> None:
     self.send_response(200)
     self.send_header("Content-Type", "text/event-stream; charset=utf-8")
@@ -2952,10 +5321,22 @@ class LocalAIServerHandler(BaseHTTPRequestHandler):
     return path.removeprefix("/documents/").strip("/")
 
   def do_GET(self) -> None:
-    path = urlparse(self.path).path
+    parsed = urlparse(self.path)
+    path = parsed.path
+    query = parse_qs(parsed.query or "")
 
     if path == "/" or path == "/index.html":
       self._send_html(HTML_PAGE)
+      return
+
+    if path.startswith("/site/maps/"):
+      base_dir = os.path.join(os.path.dirname(__file__), "site", "maps")
+      target = path.removeprefix("/site/maps/").strip("/")
+      if not target or ".." in target:
+        self._send_json({"ok": False, "error": "not found"}, status=404)
+        return
+      file_path = os.path.join(base_dir, target)
+      self._send_file(file_path)
       return
 
     if path == "/health":
@@ -2972,6 +5353,50 @@ class LocalAIServerHandler(BaseHTTPRequestHandler):
 
     if path == "/capabilities":
       self._send_json(_capabilities_api_payload())
+      return
+
+    if path == "/panel/location-weather":
+      source = str((query.get("source") or ["ip"])[0] or "ip").strip().lower()
+      manual_label = str((query.get("manual") or [""])[0] or "").strip()
+      city = str((query.get("city") or [""])[0] or "").strip()
+      region = str((query.get("region") or [""])[0] or "").strip()
+      country = str((query.get("country") or [""])[0] or "").strip()
+      provider = str((query.get("provider") or [""])[0] or "").strip()
+      fallback_reason = str((query.get("reason") or [""])[0] or "").strip()
+
+      lat = _to_float_or_none((query.get("lat") or [None])[0])
+      lon = _to_float_or_none((query.get("lon") or [None])[0])
+      accuracy = _to_float_or_none((query.get("accuracy") or [None])[0])
+
+      location_details = None
+      if source == "device":
+        location_details = {
+          "city": city,
+          "region": region,
+          "country": country,
+          "latitude": lat,
+          "longitude": lon,
+          "provider": provider or "browser_geolocation",
+        }
+      elif source == "manual":
+        location_details = {
+          "city": city or manual_label,
+          "region": region,
+          "country": country,
+          "latitude": lat,
+          "longitude": lon,
+          "provider": provider or "manual",
+        }
+
+      self._send_json(
+        _build_location_weather_payload(
+          requested_mode=source,
+          location_details=location_details,
+          manual_label=manual_label,
+          accuracy_m=accuracy,
+          fallback_reason=fallback_reason,
+        )
+      )
       return
 
     if path == "/evaluation/summary":
