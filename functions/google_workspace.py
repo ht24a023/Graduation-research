@@ -12,6 +12,7 @@ from email.mime.text import MIMEText
 from pathlib import Path
 from typing import Any
 from html import unescape
+from html.parser import HTMLParser
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote_plus, unquote_plus, urlencode, urlparse, parse_qs
 from urllib.request import Request, urlopen
@@ -46,6 +47,8 @@ def _looks_like_translation_error(text: str) -> bool:
     if not payload:
         return True
     lowered = payload.lower()
+    if payload.startswith(("（Ollama", "(Ollama")) or "timed out" in lowered or "connection refused" in lowered:
+        return True
     if any(token in payload for token in ["翻訳に失敗", "翻訳結果を取得できませんでした", "HTTP Error", "Too Many Requests", "429"]):
         return True
     if payload in {"原文と同じです", "原文と完全に同じ文字列です"}:
@@ -205,7 +208,7 @@ def _render_search_response(
 ) -> str:
     lines: list[str] = []
     if translated_input:
-        lines.append(f"日本語訳：{translated_input}")
+        lines.append(f"入力文の日本語訳：{translated_input}")
         if source_translation:
             lines.append(f"元の入力：{query}")
     elif language not in {"ja", "unknown"}:
@@ -469,6 +472,9 @@ def _build_search_keywords_from_translation(text: str) -> str:
     if not candidate:
         return ""
 
+    if "エッジAI" in candidate and "何か" in candidate:
+        return "エッジAIとは何か"
+
     lowered = candidate.replace(" ", "")
     if "ローカルでAIを実行" in candidate and any(keyword in candidate for keyword in ["利点", "メリット", "長所"]) and any(keyword in candidate for keyword in ["クラウド", "送信"]):
         return "ローカルAI 利点 クラウドAI 比較"
@@ -525,7 +531,11 @@ def _normalize_translated_input_ja(text: str) -> str:
     return body
 
 
-def _extract_search_results_payload(raw_result: object, effective_query: str) -> tuple[str, list[dict[str, str]], str | None]:
+def _extract_search_results_payload(
+    raw_result: object,
+    effective_query: str,
+    translated_input: str | None = None,
+) -> tuple[str, list[dict[str, str]], str | None]:
     if isinstance(raw_result, dict):
         results = raw_result.get("results") or []
         cleaned_results: list[dict[str, str]] = []
@@ -545,8 +555,8 @@ def _extract_search_results_payload(raw_result: object, effective_query: str) ->
                 engine=str(raw_result.get("engine") or "Google"),
                 search_query=str(raw_result.get("query") or effective_query),
                 results=cleaned_results,
-                translated_input=str(raw_result.get("translated_input") or "") or None,
-                source_translation=str(raw_result.get("translated_input") or "") or None,
+                translated_input=str(raw_result.get("translated_input") or translated_input or "") or None,
+                source_translation=str(raw_result.get("translated_input") or translated_input or "") or None,
                 body_checked=bool(raw_result.get("body_checked", False)),
                 trial_route=str(raw_result.get("trial_route") or "Google"),
             )
@@ -561,6 +571,8 @@ def _extract_search_results_payload(raw_result: object, effective_query: str) ->
         translated_result = translated_result.replace("日本語による要約：", "要約：")
         translated_result = translated_result.replace("検索内容の要約：", "要約：")
         translated_result = translated_result.replace("参照リンク：", "参考情報：")
+        if translated_input:
+            translated_result = f"入力文の日本語訳：{translated_input}\n{translated_result}"
         refs = re.findall(r"https?://[^\s\n]+", translated_result)
         parsed_results: list[dict[str, str]] = []
         for index, url in enumerate(refs, start=1):
@@ -568,6 +580,26 @@ def _extract_search_results_payload(raw_result: object, effective_query: str) ->
         return translated_result, parsed_results, None
 
     return "Google検索結果を取得できませんでした。", [], "search_fetch_failed"
+
+
+def _search_with_fallbacks(query: str, max_results: int = 5, language: str | None = None, country: str | None = None) -> object:
+    providers = (
+        lambda: _search_google_web_impl(query, max_results, language, country),
+        lambda: _search_duckduckgo_lite(query, max_results),
+        lambda: _search_bing(query, max_results),
+        lambda: _search_duckduckgo_instant_api(query, max_results),
+    )
+    result: object = "検索結果を取得できませんでした。"
+    for provider in providers:
+        try:
+            result = provider()
+        except Exception:
+            continue
+        if isinstance(result, dict) and result.get("results"):
+            return result
+        if isinstance(result, str) and re.search(r"https?://", result) and "検索結果を抽出できませんでした" not in result and "検索結果を取得できませんでした" not in result:
+            return result
+    return result
 
 
 def _prepare_search_query(query: str) -> tuple[str, str | None, str]:
@@ -857,8 +889,12 @@ def search_google_web_structured(query: str, max_results: int = 5, language: str
         actual_search_query = _build_search_keywords_from_translation(query) or query
 
     effective_query = actual_search_query or query
-    raw_result = _search_google_web_impl(effective_query, max_results, language, country)
-    summary_text, results, error_type = _extract_search_results_payload(raw_result, effective_query)
+    raw_result = _search_with_fallbacks(effective_query, max_results, language, country)
+    if isinstance(raw_result, dict) and translated_query:
+        raw_result = dict(raw_result)
+        raw_result.setdefault("translated_input", translated_query)
+        raw_result.setdefault("source_translation", translated_query)
+    summary_text, results, error_type = _extract_search_results_payload(raw_result, effective_query, translated_query)
     if results:
         return {
             "ok": True,
@@ -867,37 +903,11 @@ def search_google_web_structured(query: str, max_results: int = 5, language: str
             "original_query": query,
             "translated_query": translated_query,
             "actual_search_query": effective_query,
-            "search_engine": "Google",
+            "search_engine": str(raw_result.get("engine") if isinstance(raw_result, dict) else "Google"),
             "results": results,
             "summary_ja": summary_text,
             "error_type": None,
         }
-
-    if os.getenv("SEARCH_DEMO_MODE", "").lower() == "true":
-        demo_results = _get_demo_search_results(effective_query, max_results)
-        if isinstance(demo_results, dict):
-            demo_text = _render_search_response(
-                query=query,
-                language=detected_input_lang,
-                engine=str(demo_results.get("engine") or "Demo"),
-                search_query=str(demo_results.get("query") or effective_query),
-                results=demo_results.get("results") or [],
-                translated_input=translated_query,
-                source_translation=translated_query,
-                trial_route=str(demo_results.get("trial_route") or "Demo"),
-            )
-            return {
-                "ok": True,
-                "route": route,
-                "detected_language": detected_input_lang,
-                "original_query": query,
-                "translated_query": translated_query,
-                "actual_search_query": str(demo_results.get("query") or effective_query),
-                "search_engine": str(demo_results.get("engine") or "Demo"),
-                "results": demo_results.get("results") or [],
-                "summary_ja": demo_text,
-                "error_type": None,
-            }
 
     return {
         "ok": False,
@@ -1011,18 +1021,46 @@ def _search_duckduckgo_lite(query: str, max_results: int = 5) -> str:
     except (HTTPError, URLError, Exception):
         return "検索結果を抽出できませんでした。"
 
+    class ResultParser(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.results = []
+            self.current = None
+            self.snippet_parts = None
+
+        def handle_starttag(self, tag, attrs):
+            attrs = dict(attrs)
+            classes = (attrs.get("class") or "").split()
+            if tag == "a" and "result-link" in classes:
+                self.current = {"url": _normalize_result_url(attrs.get("href") or ""), "title": "", "snippet": ""}
+            if tag == "td" and "result-snippet" in classes:
+                self.snippet_parts = []
+
+        def handle_data(self, data):
+            if self.current is not None:
+                self.current["title"] += data
+            if self.snippet_parts is not None:
+                self.snippet_parts.append(data)
+
+        def handle_endtag(self, tag):
+            if tag == "a" and self.current is not None:
+                self.current["title"] = self.current["title"].strip()
+                if self.current["title"] and self.current["url"].startswith(("https://", "http://")):
+                    self.results.append(self.current)
+                self.current = None
+            if tag == "td" and self.snippet_parts is not None:
+                if self.results:
+                    self.results[-1]["snippet"] = " ".join("".join(self.snippet_parts).split())
+                self.snippet_parts = None
+
+    parser = ResultParser()
+    parser.feed(html)
     results: list[dict[str, str]] = []
     seen_urls: set[str] = set()
-
-    for match in re.finditer(r'<a rel="nofollow" class="result-link" href="([^"]+)">([^<]+)</a>', html, re.IGNORECASE):
-        url_candidate = unescape(match.group(1)).strip()
-        title = unescape(re.sub(r"<[^>]+>", "", match.group(2))).strip()
-
-        if not title or url_candidate in seen_urls:
-            continue
-
-        results.append({"title": title, "url": url_candidate, "snippet": ""})
-        seen_urls.add(url_candidate)
+    for item in parser.results:
+        if item["url"] not in seen_urls:
+            results.append(item)
+            seen_urls.add(item["url"])
         if len(results) >= max_results:
             break
 

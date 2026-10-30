@@ -118,7 +118,8 @@ class ResearchToolsTests(unittest.TestCase):
         self.assertIn("翻訳に失敗しました", result)
 
     def test_search_translation_failure_does_not_become_search_query(self):
-        with patch.object(google_workspace, "translate_text", return_value="翻訳に失敗しました: HTTP Error 429: Too Many Requests"), \
+        with patch.object(google_workspace, "ask_local_llm", return_value="（Ollamaタイムアウト: timed out）"), \
+             patch.object(google_workspace, "translate_text", return_value="翻訳に失敗しました: HTTP Error 429: Too Many Requests"), \
              patch.object(google_workspace, "_search_google_web_impl", return_value="Google 検索結果:\n1. Edge AI overview\nhttps://example.com/edge-ai"), \
              patch.object(google_workspace, "_search_duckduckgo_lite", return_value="検索結果を抽出できませんでした。"), \
              patch.object(google_workspace, "_search_bing", return_value="検索結果を抽出できませんでした。"):
@@ -126,7 +127,8 @@ class ResearchToolsTests(unittest.TestCase):
 
         self.assertNotIn("HTTP Error 429", result)
         self.assertNotIn("Too Many Requests", result)
-        self.assertIn("https://example.com/edge-ai", result)
+        self.assertNotIn("https://example.com/edge-ai", result)
+        self.assertIn("翻訳できませんでした", result)
 
     def test_wikipedia_summary_formats_extract_and_link(self):
         fake_payload = '{"extract":"要約本文","content_urls":{"desktop":{"page":"https://ja.wikipedia.org/wiki/テスト"}}}'

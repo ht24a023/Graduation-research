@@ -212,19 +212,21 @@ def _append_document_db_row(
 
 
 def _is_document_list_request(text: str) -> bool:
-    return bool(re.search(r"(?:文書|文章|ドキュメント).*(?:一覧|見せて|表示)", text))
+    return bool(re.search(r"(?:文書|文章|ドキュメント|DOC\d{6}).*(?:一覧|見せて|表示)", text, flags=re.IGNORECASE))
 
 
 def build_document_list_text(max_items: int = _MAX_DOC_LIST) -> str:
-    rows = _iter_documents_db_rows()
-    if not rows:
+    docs = sorted(_document_items(), key=_document_sort_key, reverse=True)
+    if not docs:
         return "保存文書はまだありません。"
 
     lines = ["保存文書一覧:"]
-    target = rows[-max_items:]
-    for cols in target:
-        doc_id, _created, _updated, status, title, file_path, chars, _checksum = cols[:8]
-        lines.append(f"- {doc_id} [{status}] {title} ({chars}文字) -> {file_path}")
+    for item in docs[:max_items]:
+        doc_id = (item.get("doc_id") or "").strip() or "IDなし"
+        title = (item.get("title") or "無題").strip() or "無題"
+        chars = int(item.get("chars") or 0)
+        file_path = (item.get("file_path") or "").strip() or "(パスなし)"
+        lines.append(f"- {doc_id} [active] {title} ({chars}文字) -> {file_path}")
     return "\n".join(lines)
 
 
@@ -550,12 +552,24 @@ def _find_document_by_keyword(keyword: str) -> dict[str, Any] | None:
     if not key:
         return docs[-1]
 
+    key_compact = re.sub(r"\s+", "", key)
+    if re.fullmatch(r"doc\d{6}", key_compact, flags=re.IGNORECASE):
+        target_id = key_compact.upper()
+        for item in docs:
+            if (item.get("doc_id") or "").strip().upper() == target_id:
+                return item
+
     best = None
     best_score = -1
     for item in docs:
         title = (item.get("title") or "")
         preview = (item.get("preview") or "")
+        doc_id = (item.get("doc_id") or "").lower()
         score = 0
+        if key == doc_id:
+            score += 5
+        elif key in doc_id:
+            score += 2
         if key in title.lower():
             score += 3
         if key in preview.lower():
@@ -577,6 +591,12 @@ def _find_documents_by_keyword(keyword: str) -> list[dict[str, Any]]:
     if not key:
         return docs[-6:]
 
+    key_compact = re.sub(r"\s+", "", key)
+    if re.fullmatch(r"doc\d{6}", key_compact, flags=re.IGNORECASE):
+        target_id = key_compact.upper()
+        matched = [item for item in docs if (item.get("doc_id") or "").strip().upper() == target_id]
+        return matched[:1]
+
     tokens = [tok for tok in re.split(r"[\s　、,。]+", key) if tok]
     if not tokens:
         tokens = [key]
@@ -585,7 +605,12 @@ def _find_documents_by_keyword(keyword: str) -> list[dict[str, Any]]:
     for item in docs:
         title = (item.get("title") or "").lower()
         preview = (item.get("preview") or "").lower()
+        doc_id = (item.get("doc_id") or "").lower()
         score = 0
+        if key == doc_id:
+            score += 5
+        elif key in doc_id:
+            score += 2
         if key in title:
             score += 3
         if key in preview:
@@ -632,10 +657,16 @@ def _find_document_by_session() -> dict[str, Any] | None:
 def _is_document_show_request(text: str) -> bool:
     if not re.search(r"(出して|見せて|表示して|表示|見たい)", text):
         return False
+    if re.search(r"(?<![A-Za-z0-9])DOC\d{6}(?!\d)", text, flags=re.IGNORECASE):
+        return True
     return bool(re.search(r"(文書|文章|自己PR|ES|ガクチカ|志望動機|200字|400字|1000字)", text))
 
 
 def _extract_document_show_keyword(text: str) -> str:
+    title_match = re.search(r"(?:タイトル|件名)[「『\"]?(.+?)[」』\"]?(?:を)?(?:出して|見せて|表示して|表示|見たい)$", text)
+    if title_match:
+        return (title_match.group(1) or "").strip()
+
     keyword = (text or "").strip()
     keyword = re.sub(r"(?:を)?(?:出して|見せて|表示して|表示|見たい)$", "", keyword)
     keyword = re.sub(r"(?:の)?(?:文書|文章)$", "", keyword)
@@ -644,6 +675,29 @@ def _extract_document_show_keyword(text: str) -> str:
     keyword = keyword.replace("版", "")
     keyword = re.sub(r"\s+", " ", keyword)
     return keyword.strip()
+
+
+def _extract_document_delete_target(text: str) -> tuple[str, str] | None:
+    normalized = (text or "").strip()
+    if not normalized:
+        return None
+
+    if not re.search(r"(削除|消して|消去|取り消して)", normalized):
+        return None
+
+    id_match = re.search(r"(?<![A-Za-z0-9])(DOC\d{6})(?!\d)", normalized, flags=re.IGNORECASE)
+    if id_match:
+        return ((id_match.group(1) or "").upper(), "")
+
+    title_match = re.search(r"(?:タイトル|件名)[：:\s]*[「『\"]?(.+?)[」』\"]?(?:を)?(?:削除|消して|消去|取り消して)", normalized)
+    if title_match:
+        return ("", (title_match.group(1) or "").strip())
+
+    plain_match = re.search(r"(.+?)(?:の)?(?:文書|文章)を(?:削除|消して|消去|取り消して)", normalized)
+    if plain_match:
+        return ("", (plain_match.group(1) or "").strip(" 。、"))
+
+    return None
 
 
 def _extract_variant_key(text: str) -> str:
@@ -772,10 +826,25 @@ def _build_document_output_from_item(item: dict[str, Any], variant_key: str = ""
         lines.append(f"抽出: {variant_key}版")
     lines.append("本文:")
     lines.append(rendered or "(本文なし)")
-    return {"response": "\n".join(lines)}
+    return {"response": "\n".join(lines), "document": {"doc_id": doc_id, "title": title, "content": rendered or ""}}
 
 
 def _build_document_output_with_meta(keyword: str) -> dict[str, Any]:
+    key = (keyword or "").strip()
+    if key:
+        exact_id_match = re.search(r"(?<![A-Za-z0-9])(DOC\d{6})(?!\d)", key, flags=re.IGNORECASE)
+        if exact_id_match:
+            exact_item = _find_document_exact(doc_id=(exact_id_match.group(1) or "").upper())
+            if exact_item:
+                variant_key = _extract_variant_key(key)
+                return _build_document_output_from_item(exact_item, variant_key=variant_key)
+            return {"response": f"保存文書が見つかりませんでした。文書ID: {(exact_id_match.group(1) or '').upper()}"}
+
+        exact_item = _find_document_exact(title=key)
+        if exact_item:
+            variant_key = _extract_variant_key(key)
+            return _build_document_output_from_item(exact_item, variant_key=variant_key)
+
     matches = _find_documents_by_keyword(keyword)
     if not matches:
         return {"response": "保存文書が見つかりませんでした。"}
@@ -808,6 +877,14 @@ def _build_document_output(keyword: str) -> str:
 
 
 def _extract_document_update_target_hint(text: str) -> str:
+    id_match = re.search(r"(?<![A-Za-z0-9])(DOC\d{6})(?!\d)", text, flags=re.IGNORECASE)
+    if id_match:
+        return (id_match.group(1) or "").upper()
+
+    m = re.search(r"(.+?)(?:の)?本文.*(?:変更|修正|更新)して", text)
+    if m:
+        return (m.group(1) or "").strip(" 。、")
+
     m = re.search(r"(.+?)(?:の)?(?:文書|文章|自己PR|ES).*(?:変更|修正|更新)して", text)
     if m:
         return (m.group(1) or "").strip(" 。、")
@@ -820,6 +897,14 @@ def _extract_document_update_content(text: str) -> str:
         return ""
     if not re.search(r"(?:変更|修正|更新)(?:して)?", normalized):
         return ""
+
+    m = re.search(r"(?:本文|内容)\s*を?\s*次の(?:内容|本文)?\s*に?(?:変更|修正|更新)して[：:\s]*(.+)$", normalized, flags=re.DOTALL)
+    if m:
+        return (m.group(1) or "").strip()
+
+    m = re.search(r"(?:変更|修正|更新)して[：:\s]*(.+)$", normalized, flags=re.DOTALL)
+    if m:
+        return (m.group(1) or "").strip()
 
     m = re.search(r"(?:本文|内容)[：:\s]*(.+)$", normalized, flags=re.DOTALL)
     if m:
@@ -1681,6 +1766,7 @@ def _extract_keep_document(text: str) -> tuple[str, str] | None:
     patterns = [
         r"(.+?)の(?:文書|文章|テキスト)を(?:保存しておいてほしい|保存してほしい|保存しておいて|保存しといてほしい|保存しといて|覚えておいてほしい|覚えておいて|記録しておいてほしい|記録しておいて|保存して)[。．:\s\n]*(.+)$",
         r"(?:タイトル|件名)[：:\s]*(.+?)(?:\n|,|、)\s*(?:本文|内容|データ)[：:\s]*(.+)$",
+        r"(?:タイトル|件名)[「『\"]?(.+?)[」』\"]?\s*(?:で|、|,)?\s*(?:本文|内容)[「『\"]?(.+?)[」』\"]?\s*(?:を|って)?(?:保存しておいてほしい|保存してほしい|保存しておいて|保存しといてほしい|保存しといて|覚えておいてほしい|覚えておいて|記録しておいてほしい|記録しておいて|保存して)$",
     ]
 
     for pat in patterns:
@@ -1943,12 +2029,33 @@ def handle_explicit_note_command_with_meta(text: str) -> dict[str, Any] | None:
     if _is_note_list_request(normalized):
         return {"response": build_notes_list_text()}
 
+    if _is_document_show_request(normalized) and '一覧' not in normalized:
+        keyword = _extract_document_show_keyword(normalized)
+        return _build_document_output_with_meta(keyword)
+
     if _is_document_list_request(normalized):
-        return {"response": build_document_list_text()}
+        return {"response": build_document_list_text(), "documents": list_document_items()}
 
     if _is_document_show_request(normalized):
         keyword = _extract_document_show_keyword(normalized)
         return _build_document_output_with_meta(keyword)
+
+    document_delete_target = _extract_document_delete_target(normalized)
+    if document_delete_target:
+        target_doc_id, target_title = document_delete_target
+        if not target_doc_id and target_title:
+            target_item = _find_document_exact(title=target_title)
+            target_doc_id = (target_item or {}).get("doc_id", "") if isinstance(target_item, dict) else ""
+
+        if not target_doc_id:
+            if target_title:
+                return {"response": f"指定された文書が見つかりませんでした。タイトル: {target_title}"}
+            return {"response": "文書の削除対象が見つかりませんでした。"}
+
+        deleted = delete_document_item(str(target_doc_id))
+        if deleted.get("ok"):
+            return {"response": f"文書を削除しました。文書ID: {target_doc_id}"}
+        return {"response": str(deleted.get("error") or "文書の削除に失敗しました。")}
 
     updated_message = _update_document_from_text(normalized)
     if updated_message:

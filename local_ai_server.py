@@ -11,6 +11,7 @@ import re         # 正規表現で入力文の判定や文字列処理を行う
 import sys        # 発生中の例外情報を取得する
 import threading  # 複数処理から共有データを扱う際のロックに使う
 import time       # 処理時間の計測やキャッシュ期限の判定に使う
+import queue
 import socket     # ネットワーク接続に使うPCのIPアドレスを取得する
 
 from collections import deque  # 保存件数に上限を設けられるキューで会話履歴を管理する
@@ -46,12 +47,155 @@ from models.user_profile_memory import (  # 利用者情報と保存文書を管
 )
 
 
-from cloud.local_llm import ask_local_llm, ask_local_llm_json, stream_local_llm  # ローカルLLMから通常回答・JSON回答・逐次生成の回答を取得する
+from cloud.local_llm import ask_local_llm as _ask_local_llm, ask_local_llm_json, stream_local_llm  # ローカルLLMから通常回答・JSON回答・逐次生成の回答を取得する
 from cloud.local_prompt import build_local_prompt  # 質問や会話履歴、利用者情報からローカルLLMへの指示文を作る
-from cloud.openai_client import ask_cloud_ai  # クラウドAIへ指示文を送り、回答を取得する
+from cloud.openai_client import ask_cloud_ai as _ask_cloud_ai  # クラウドAIへ指示文を送り、回答を取得する
 from functions.google_workspace import search_google_web, search_google_web_structured  # Google検索の結果を文章形式・構造化データ形式で取得する
-from functions.weather import get_weather  # 指定地域などの天気情報を取得する
+from functions.weather import get_weather, parse_weather_query  # 指定地域などの天気情報を取得する
 from models.evaluation_metrics import build_user_facing_evaluation, evaluation_metrics  # 画面用の評価情報を作成し、評価記録の保存・集計を行う
+
+
+from functions.system_monitor import system_monitor
+from functions.research_tools import translate_text_structured, wikipedia_summary
+from functions.dashboard_tools import youtube_results, local_qr
+from models.execution_trace import (traced_request, run_stage, add_card, mark_text_ready,
+                                    event_sink, processing_history, save_client_timings, processing_csv)
+
+
+def _tool_call(kind, function, *args, **kwargs):
+    def outcome(value):
+        if isinstance(value, dict):
+            return bool(value.get('ok', True))
+        return not (isinstance(value, str) and re.search(r'取得できません|取得に失敗|検索に失敗|失敗しました|未設定です|特定できません', value))
+    result = run_stage('tool', function, *args, tool_name=kind, success_check=outcome, **kwargs)
+    if kind == 'document':
+        if isinstance(result, dict) and ('document' in result or 'documents' in result):
+            add_card(kind, result, success=result.get('ok', True))
+    else:
+        data = result if isinstance(result, dict) else {'text': str(result), 'query': str(args[0]) if args else ''}
+        success = bool(data.get('ok', True))
+        if isinstance(result, str) and re.search(r'取得できません|取得に失敗|検索に失敗|失敗しました|未設定です', result):
+            success = False
+        add_card(kind, data, success=success)
+    return result
+
+
+def _parse_dashboard_request(text):
+    # これは実行するツールの選択。カードは実行後の戻り値からのみ作る。
+    if re.search(r'(?:CPU|GPU|RAM|メモリ|ディスク|ネットワーク).*(?:使用|状態|温度|空き)|システム(?:情報|モニター)', text, re.I):
+        return {'kind': 'system'}
+    if re.search(r'QR(?:コード)?', text, re.I):
+        match = re.search(r'(?:QR(?:コード)?(?:を)?(?:作成|生成|にして|化して)?[：:\s]+)(.+)', text, re.I | re.S)
+        value = match.group(1).strip() if match else re.sub(r'(?:を|の)?QRコード.*$', '', text, flags=re.I).strip()
+        return {'kind': 'qr', 'text': value}
+    if re.search(r'YouTube|ユーチューブ', text, re.I):
+        query = re.sub(r'YouTube|ユーチューブ|で検索して|を検索して|を探して|で探して|検索して', '', text, flags=re.I).strip(' ：:をで')
+        return {'kind': 'youtube', 'query': query}
+    if re.search(r'Wikipedia|ウィキペディア', text, re.I):
+        query = re.sub(r'Wikipedia|ウィキペディア|で調べて|で検索して|を調べて|を検索して', '', text, flags=re.I).strip(' ：:をで')
+        return {'kind': 'wikipedia', 'query': query}
+    match = re.search(r'^(?:次の(?:文章|英文|文|テキスト)を)?(日本語|英語|中国語|韓国語|フランス語|ドイツ語)に(?:翻訳してください|翻訳して|翻訳|訳して)[：:\s]+(.+)$', text, re.S)
+    if match:
+        languages = {'日本語':'ja','英語':'en','中国語':'zh-CN','韓国語':'ko','フランス語':'fr','ドイツ語':'de'}
+        return {'kind': 'translate', 'text': match.group(2).strip(), 'target_lang': languages[match.group(1)], 'source_lang':'auto'}
+    match = re.search(r'(.+?)(?:を|って)(日本語|英語|中国語|韓国語)に(?:翻訳して|訳して)', text, re.S)
+    if match:
+        return {'kind':'translate','text':match.group(1).strip('「」 '),'target_lang':{'日本語':'ja','英語':'en','中国語':'zh-CN','韓国語':'ko'}[match.group(2)],'source_lang':'auto'}
+    return None
+
+
+def _dispatch_dashboard_tool(request):
+    kind = str(request.get('kind') or '')
+    query = str(request.get('query') or '')[:4000]
+    if kind == 'translate':
+        text = str(request.get('text') or '')[:10000]
+        source = str(request.get('source_lang') or 'auto')
+        target = str(request.get('target_lang') or 'en')
+        if source not in {'auto','ja','en','zh-CN','ko','fr','de','es'} or target not in {'ja','en','zh-CN','ko','fr','de','es'}:
+            raise ValueError('対応する言語を選択してください。')
+        result = run_stage('tool', translate_text_structured, text, target_lang=target, source_lang=source, tool_name='translate')
+        add_card('translate', {**result, 'original_text':text, 'target_language':target,
+                              'external_url':'https://translate.google.com/?sl='+source+'&tl='+target+'&text='+__import__('urllib.parse',fromlist=['quote']).quote(text)+'&op=translate'}, success=result.get('ok'))
+        return bool(result.get('ok')), str(result.get('translated_text') or result.get('error') or '翻訳に失敗しました。')
+    if kind == 'system':
+        result = _tool_call('system', system_monitor.snapshot)
+        if not result.get('ok'):
+            return False, result.get('error','取得できませんでした。')
+        return True, f"バックエンドPCのCPU使用率は{result['cpu']['usage_percent']}%、RAM使用率は{result['memory']['usage_percent']}%です。"
+    if kind == 'document':
+        def read_document():
+            doc_id = str(request.get('doc_id') or '')
+            if doc_id:
+                document = get_document_item(doc_id=doc_id)
+                return {'ok': bool(document), 'document': document, 'error':'' if document else '文書が見つかりませんでした。'}
+            return {'ok': True, 'documents': list_document_items()}
+        result = _tool_call('document', read_document)
+        document = result.get('document') or {}
+        return bool(result.get('ok')), str(document.get('content') or result.get('error') or f"保存文書は{len(result.get('documents',[]))}件です。文書パネルで選択できます。")
+    if kind in {'youtube','qr'}:
+        result = _tool_call(kind, youtube_results if kind == 'youtube' else local_qr, query if kind == 'youtube' else str(request.get('text') or ''))
+        return bool(result.get('ok')), str(result.get('error') or ('動画一覧を表示しました。' if kind == 'youtube' else 'QRコードをPC内で生成しました。'))
+    if kind == 'wikipedia':
+        result = _tool_call('search', wikipedia_summary, query)
+        return '失敗しました' not in result and '取得できません' not in result, result
+    if kind == 'search':
+        result = _tool_call('search', search_google_web_structured, query)
+        return bool(result.get('ok')), _format_structured_search_response(result) if result.get('ok') else '検索結果を取得できませんでした。'
+    if kind == 'weather':
+        result = _tool_call('weather', get_weather, query)
+        return not bool(re.search(r'取得できません|取得に失敗',result)), result
+    if kind == 'map':
+        result = _tool_call('map', resolve_navigation, query)
+        return not bool(re.search(r'失敗しました',result)), result
+    raise ValueError('対応していないツールです。')
+
+
+# リクエストごとに実行中の処理状態をSSEへ通知する。
+_ACTIVITY = threading.local()
+
+
+def _notify_activity(state):
+    callback = getattr(_ACTIVITY, "callback", None)
+    if callback:
+        callback({"state": state})
+
+
+def ask_local_llm(*args, **kwargs):
+    _notify_activity("thinking")
+    return _ask_local_llm(*args, **kwargs)
+
+
+def ask_cloud_ai(*args, **kwargs):
+    _notify_activity("cloud")
+    return _ask_cloud_ai(*args, **kwargs)
+
+
+def _chat_activity_events(message, session_id, **kwargs):
+    """通常の/chat処理を維持し、状態と最終結果のみを別スレッドから通知。"""
+    events = queue.Queue()
+
+    def work():
+        _ACTIVITY.callback = lambda data: events.put({"event": "status", "data": data})
+        try:
+            _notify_activity("analyzing")
+            with event_sink(events.put):
+                payload = _build_chat_payload(message, session_id, **kwargs)
+            events.put({"event": "done" if payload.get("ok") else "error", "data": payload})
+        except Exception:
+            events.put({"event": "error", "data": {"ok": False, "error": "処理中にエラーが発生しました。"}})
+        finally:
+            del _ACTIVITY.callback
+
+    threading.Thread(target=work, daemon=True).start()
+    while True:
+        try:
+            event = events.get(timeout=10)
+        except queue.Empty:
+            yield {"event": "ping", "data": {}}
+            continue
+        yield event
+        if event["event"] in {"done", "error"}:
+            break
 
 
 # サーバー全体で使う基本設定
@@ -1284,6 +1428,7 @@ def _attach_evaluation(
 
 
 # メッセージを受け取り、最終レスポンスとUI情報を組み立てる本体処理
+@traced_request
 def _build_chat_payload(
   message: str,
   session_id: str,
@@ -1291,6 +1436,7 @@ def _build_chat_payload(
   current_location: str = "",
   experiment_mode: str | None = None,
   test_case_id: str = "",
+  tool_request: dict | None = None,
 ) -> dict[str, Any]:
   message = (message or "").strip()
   current_location = (current_location or "").strip()
@@ -1344,6 +1490,7 @@ def _build_chat_payload(
     if extra:
       payload.update(extra)
 
+    mark_text_ready()
     elapsed = time.perf_counter() - started
     return _attach_evaluation(
       base_payload=payload,
@@ -1359,6 +1506,18 @@ def _build_chat_payload(
       api_called=api_called,
       success=ok,
     )
+
+  requested_tool = tool_request or run_stage('intent', _parse_dashboard_request, effective_message)
+  if requested_tool:
+    try:
+      tool_started = time.perf_counter()
+      ok, response = _dispatch_dashboard_tool(requested_tool)
+      local_time_sec += time.perf_counter() - tool_started
+      _append_turn(session_id, 'user', message)
+      _append_turn(session_id, 'assistant', response)
+      return finalize(ok=ok, route='local_function' if ok else 'error', response=response, error=None if ok else response)
+    except Exception as error:
+      return finalize(ok=False, route='error', error=f'ツールを実行できませんでした: {error}')
 
   if approve_token:
     pending = _pop_pending_api_approval(approve_token)
@@ -1399,7 +1558,7 @@ def _build_chat_payload(
   # 自動メモリ更新: ユーザー発話から重要情報のみ保存し、削除指示も反映
   update_profile_from_text(effective_message)
 
-  explicit_note_payload = handle_explicit_note_command_with_meta(effective_message)
+  explicit_note_payload = _tool_call('document', handle_explicit_note_command_with_meta, effective_message)
 
   _append_turn(session_id, "user", message)
   history = _snapshot_session(session_id)
@@ -1442,11 +1601,11 @@ def _build_chat_payload(
       response_payload["ui"] = explicit_note_payload["ui"]
     return finalize(ok=True, route="local_function", response=explicit_note_response, extra=response_payload)
 
-  intent = classify_intent(effective_message)
+  intent = run_stage('intent', classify_intent, effective_message)
   prefer_local_llm = _prefer_local_llm_over_search(effective_message)
   clarification_decision = None
   if not clarification_followup and experiment_mode != "FIXED_ROUTING":
-    clarification_decision = _detect_required_clarification(effective_message, history, intent)
+    clarification_decision = run_stage('intent', _detect_required_clarification, effective_message, history, intent)
 
   if clarification_decision and clarification_decision.get("needs_clarification"):
     question = str(clarification_decision.get("question") or "").strip()
@@ -1463,21 +1622,21 @@ def _build_chat_payload(
 
   if intent == "relative_weekday" or _looks_like_relative_weekday_question(message):
     local_started = time.perf_counter()
-    response = get_weekday_from_text(effective_message)
+    response = run_stage('tool', get_weekday_from_text, effective_message)
     local_time_sec += time.perf_counter() - local_started
     _append_turn(session_id, "assistant", response)
     return finalize(ok=True, route="local_function", response=response)
 
   if intent == "weekday":
     local_started = time.perf_counter()
-    response = get_weekday()
+    response = run_stage('tool', get_weekday)
     local_time_sec += time.perf_counter() - local_started
     _append_turn(session_id, "assistant", response)
     return finalize(ok=True, route="local_function", response=response)
 
   if intent == "time":
     local_started = time.perf_counter()
-    response = get_time()
+    response = run_stage('tool', get_time)
     local_time_sec += time.perf_counter() - local_started
     _append_turn(session_id, "assistant", response)
     return finalize(ok=True, route="local_function", response=response)
@@ -1485,7 +1644,7 @@ def _build_chat_payload(
   if intent == "calculate" or _looks_like_calculation(effective_message):
     calc_input = clarification_followup[1] if clarification_followup else recompute_message
     local_started = time.perf_counter()
-    response = calculate(calc_input)
+    response = run_stage('tool', calculate, calc_input)
     local_time_sec += time.perf_counter() - local_started
     _append_turn(session_id, "assistant", response)
     return finalize(ok=True, route="local_function", response=response)
@@ -1498,7 +1657,7 @@ def _build_chat_payload(
     if current_location:
       navigation_input = navigation_input.replace("ここから", f"{current_location}から")
     local_started = time.perf_counter()
-    response = resolve_navigation(
+    response = _tool_call('map', resolve_navigation,
       navigation_input,
       current_location=current_location,
       current_location_details=location_details,
@@ -1513,7 +1672,7 @@ def _build_chat_payload(
     if current_location and not parse_weather_query(recompute_message).get("location"):
       weather_query = current_location + "の天気"
     local_started = time.perf_counter()
-    response = get_weather(weather_query, current_location_details=location_details)
+    response = _tool_call('weather', get_weather, weather_query, current_location_details=location_details)
     local_time_sec += time.perf_counter() - local_started
     _append_turn(session_id, "assistant", response)
     weather_ui = _build_missing_info_ui(
@@ -1531,9 +1690,9 @@ def _build_chat_payload(
 
   if intent == "search" and not prefer_local_llm:
     local_started = time.perf_counter()
-    search_payload = search_google_web_structured(recompute_message)
+    search_payload = _tool_call('search', search_google_web_structured, recompute_message)
     local_time_sec += time.perf_counter() - local_started
-    fallback_search_result = search_google_web(recompute_message)
+    fallback_search_result = run_stage('tool', search_google_web, recompute_message, tool_name='search_fallback') if not search_payload.get('ok') or search_payload.get('search_engine') == 'Demo' else ''
     if search_payload.get("ok") and str(search_payload.get("search_engine") or "") == "Demo" and fallback_search_result and fallback_search_result not in {
       "Google検索結果を取得できませんでした。",
       "入力された文章を日本語へ翻訳できませんでした。日本語で入力し直すか、翻訳を再試行してください。",
@@ -1555,6 +1714,7 @@ def _build_chat_payload(
       "入力された文章を日本語へ翻訳できませんでした。日本語で入力し直すか、翻訳を再試行してください。",
     }:
       route_label = "local_search"
+      add_card("search", {"text": fallback_search_result, "query": recompute_message})
       _append_turn(session_id, "assistant", fallback_search_result)
       print(f"route={route_label}")
       return finalize(ok=True, route=route_label, response=fallback_search_result, extra={"ui": _build_search_success_ui()})
@@ -1567,9 +1727,9 @@ def _build_chat_payload(
 
   if _looks_like_fact_question(effective_message) and not prefer_local_llm:
     local_started = time.perf_counter()
-    search_payload = search_google_web_structured(recompute_message)
+    search_payload = _tool_call('search', search_google_web_structured, recompute_message)
     local_time_sec += time.perf_counter() - local_started
-    fallback_search_result = search_google_web(recompute_message)
+    fallback_search_result = run_stage('tool', search_google_web, recompute_message, tool_name='search_fallback') if not search_payload.get('ok') or search_payload.get('search_engine') == 'Demo' else ''
     if search_payload.get("ok") and str(search_payload.get("search_engine") or "") == "Demo" and fallback_search_result and fallback_search_result not in {
       "Google検索結果を取得できませんでした。",
       "入力された文章を日本語へ翻訳できませんでした。日本語で入力し直すか、翻訳を再試行してください。",
@@ -1591,6 +1751,7 @@ def _build_chat_payload(
       "入力された文章を日本語へ翻訳できませんでした。日本語で入力し直すか、翻訳を再試行してください。",
     }:
       route_label = "local_search"
+      add_card("search", {"text": fallback_search_result, "query": recompute_message})
       _append_turn(session_id, "assistant", fallback_search_result)
       print(f"route={route_label}")
       return finalize(ok=True, route=route_label, response=fallback_search_result, extra={"ui": _build_search_success_ui()})
@@ -1670,9 +1831,9 @@ def _build_chat_payload(
   # DYNAMIC_ROUTING: do not call cloud immediately.
   # First show Google evidence and ask user whether cloud API usage is allowed.
   local_started = time.perf_counter()
-  search_payload = search_google_web_structured(message)
+  search_payload = _tool_call('search', search_google_web_structured, message)
   local_time_sec += time.perf_counter() - local_started
-  fallback_search_result = search_google_web(message)
+  fallback_search_result = run_stage('tool', search_google_web, message, tool_name='search_fallback') if not search_payload.get('ok') else ''
   if search_payload.get("ok") or (fallback_search_result and fallback_search_result not in {"Google検索結果を取得できませんでした。", "入力された文章を日本語へ翻訳できませんでした。日本語で入力し直すか、翻訳を再試行してください。"}):
     approval_token = uuid4().hex
     reject_token = uuid4().hex
@@ -3088,12 +3249,25 @@ HTML_PAGE = """<!doctype html>
       .scroll-guide { display: none; }
     }
   </style>
+  <link rel="stylesheet" href="/site/dashboard/dashboard.css" />
 </head>
 <body>
   <div class="shell jarvis-shell">
+    <header class="dashboard-header">
+      <div class="dashboard-brand">AI<span> / </span>CORE <small>LOCAL FIRST ASSISTANT</small></div>
+      <nav class="dashboard-nav" aria-label="情報パネル">
+        <button type="button" data-open-panel="weather" aria-expanded="false">天気</button>
+        <button type="button" data-open-panel="map" aria-expanded="false">地図</button>
+        <button type="button" data-open-panel="location" aria-expanded="false">現在地</button>
+        <button type="button" data-open-panel="translate" aria-expanded="false">翻訳</button>
+        <button type="button" data-open-panel="search" aria-expanded="false">検索</button>
+        <button type="button" id="close-all-panels">すべて閉じる</button>
+        <button type="button" id="open-workspace" aria-expanded="false">文書・設定</button>
+      </nav>
+    </header>
     <section class="first-screen">
-      <aside class="panel hud-left">
-        <div class="panel-header"><strong>Location</strong></div>
+      <aside class="panel hud-left" data-info-panel="location" hidden>
+        <div class="panel-header"><strong>現在地</strong></div>
         <div class="panel-body">
           <div class="card geo-panel" id="geo-panel-card">
             <div class="geo-maps-wrap">
@@ -3172,32 +3346,55 @@ HTML_PAGE = """<!doctype html>
         </div>
       </aside>
 
+      <aside class="monitor-column">
+        <section class="panel system-monitor">
+          <div class="panel-header"><strong>SYSTEM MONITOR</strong><span class="live-badge" id="monitor-status">接続中</span></div>
+          <div class="panel-body" id="system-monitor-content"><p>PC情報を取得しています…</p></div>
+        </section>
+        <section class="panel ai-core-panel">
+          <div class="panel-header"><strong>AI CORE</strong><span class="core-mode">LIVE STATE</span></div>
+          <div id="ai-core" data-state="idle" role="img" aria-label="AIの状態: 待機中">
+            <div class="core-orbit"></div><div class="core-inner"></div><div class="core-center">AI</div>
+          </div>
+          <div id="core-state-label" role="status" aria-live="polite">待機中</div>
+          <p class="core-caption" id="core-caption">ローカルアシスタント</p>
+          <div class="voice-controls"><button type="button" id="voice-start">音声入力</button><label><input type="checkbox" id="speak-enabled" /> 読み上げ</label></div>
+          <p class="core-caption" id="voice-support"></p>
+        </section>
+      </aside>
       <section class="panel hud-center">
         <div class="panel-header">
-          <strong>Chat</strong>
+          <strong>CHAT / 会話</strong>
           <div class="status"><span class="dot"></span><span id="session-text">session ready</span></div>
         </div>
         <div class="panel-body chat-body">
           <div id="chat-log"></div>
-          <div class="composer" style="margin-top:12px;">
+          <div class="composer">
             <div class="quick-grid">
               <button class="secondary quick-prompt" type="button" data-text="このローカルサーバーでできることを具体例つきで教えて">できること</button>
               <button class="secondary quick-prompt" type="button" data-text="ここから東京駅までの行き方を教えて">ルート</button>
               <button class="secondary quick-prompt" type="button" data-text="(150+230)÷19 を計算して">計算</button>
               <button class="secondary quick-prompt" type="button" data-text="保存してある自己PR文書を一覧で見せて">文書一覧</button>
             </div>
-            <textarea id="message" placeholder="メッセージを入力..."></textarea>
+            <label class="composer-label" for="message">メッセージ</label><textarea id="message" aria-label="メッセージ" placeholder="メッセージを入力…（Shift + Enterで改行）"></textarea>
             <div class="row">
               <input id="session-id" placeholder="session id" />
               <input id="current-location" placeholder="現在地（任意）" />
-              <button id="send-btn" type="button">Send</button>
-              <button id="reset-btn" class="secondary" type="button">Reset</button>
+              <button id="send-btn" type="button">送信</button>
+              <button id="reset-btn" class="secondary" type="button">新しい会話</button>
             </div>
           </div>
         </div>
       </section>
 
       <aside class="hud-right">
+        <div id="info-panel-dock">
+          <div id="panels-empty"><span>INFORMATION</span><h2>会話に、必要な情報を。</h2><p>上のボタンからパネルを開けます。<br>ピン留めしたパネルは表示を維持します。</p></div>
+          <section class="panel" data-info-panel="weather" hidden><div class="panel-header"><strong>天気</strong></div><div class="panel-body" id="weather-summary"><p>現在地の天気を取得しています…</p></div></section>
+          <section class="panel" data-info-panel="map" hidden><div class="panel-header"><strong>地図</strong></div><div class="panel-body" id="map-panel-content"><p class="core-caption">現在地パネルで選択した地域を表示します。</p></div></section>
+          <section class="panel" data-info-panel="translate" hidden><div class="panel-header"><strong>翻訳</strong></div><div class="panel-body"><p>翻訳は中央のチャットから依頼できます。</p><p class="core-caption">翻訳結果のカード連携は保留中です。</p><button type="button" data-panel-prompt="次の文章を日本語に翻訳して：">チャットで翻訳する</button></div></section>
+          <section class="panel" data-info-panel="search" hidden><div class="panel-header"><strong>検索</strong></div><div class="panel-body"><p>調べたい内容を中央のチャットに入力してください。</p><p class="core-caption">検索結果のカード連携は保留中です。</p><button type="button" data-panel-prompt="次の内容を検索して：">チャットで検索する</button></div></section>
+        </div>
         <section class="panel clock-panel">
           <div class="panel-body">
             <div class="clock-time" id="clock-time">--:--:--</div>
@@ -3228,10 +3425,10 @@ HTML_PAGE = """<!doctype html>
         </section>
       </aside>
 
-      <div class="scroll-guide">文書管理と詳細設定は下にあります</div>
+
     </section>
 
-    <section class="lower-section">
+    <section class="lower-section" id="workspace-drawer" hidden role="dialog" aria-label="文書管理と詳細設定" aria-modal="true" tabindex="-1"><button type="button" id="close-workspace">閉じる ×</button>
       <div class="panel">
         <div class="panel-header">
           <strong>Documents</strong>
@@ -3282,6 +3479,8 @@ HTML_PAGE = """<!doctype html>
   </div>
 
   <script src="/site/maps/topojson-client.min.js"></script>
+  <script src="/site/dashboard/dashboard.js"></script>
+  <script src="/site/dashboard/workbench.js"></script>
   <script>
     const chatLog = document.getElementById('chat-log');
     const messageInput = document.getElementById('message');
@@ -4029,7 +4228,7 @@ HTML_PAGE = """<!doctype html>
       geoLocationMeta.textContent = `地域: ${location.region || location.city || '—'} / 国: ${location.country || '—'} / 住所: ${formalAddress}`;
       geoLatLon.textContent = `緯度: ${formatLatLon(location.latitude)} / 経度: ${formatLatLon(location.longitude)}`;
       geoProvider.textContent = `取得元: ${mode === 'device' ? '端末位置' : mode === 'manual' ? '手動' : 'IP推定'} / ${location.provider || '—'}`;
-      geoAccuracy.textContent = `精度: ${formatAccuracy(location.accuracy_m)}`;
+      geoAccuracy.textContent = mode === 'ip' ? '精度: IPによる概算（誤差は不明）' : mode === 'manual' ? '精度: 指定地域の代表地点' : `精度: ${formatAccuracy(location.accuracy_m)}`;
       geoTimezone.textContent = weather.timezone || '—';
       geoLocalTime.textContent = weather.local_time || '—';
       geoWeather.textContent = weather.weather || '—';
@@ -4532,8 +4731,11 @@ HTML_PAGE = """<!doctype html>
         `累計クラウドAPI呼出削減率：${reductionRate}％`,
       ];
 
-      const wrap = document.createElement('div');
+      const wrap = document.createElement('details');
       wrap.className = 'evaluation-wrap';
+      const summary = document.createElement('summary');
+      summary.textContent = '回答の評価・API使用の詳細';
+      wrap.appendChild(summary);
 
       const body = document.createElement('div');
       body.className = 'meta-line';
@@ -5037,6 +5239,7 @@ HTML_PAGE = """<!doctype html>
         return;
       }
 
+      if (window.workbench?.busy() && !isSending) return;
       if (isSending) {
         queuedMessage = text;
         messageInput.value = text;
@@ -5051,21 +5254,20 @@ HTML_PAGE = """<!doctype html>
       isSending = true;
       sendBtn.disabled = true;
       runtimeProcessing.textContent = '処理中';
+      window.aiCore.setState('thinking');
       addBubble('user', text);
       messageInput.value = '';
 
       const typing = addBubble('system', 'thinking...');
 
       try {
-        const res = await fetch('/chat', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ message: text, session_id: sessionId, current_location: currentLocation })
-        });
-        const data = await res.json();
+        const data = await window.dashboardRequest({ message: text, session_id: sessionId, current_location: currentLocation });
         typing.remove();
         if (data.ok) {
           addBubble('assistant', data.response);
+          window.workbench.complete(data);
+          if (window.workbench.succeeded(data)) window.aiCore.answer(data.response, data.evaluation);
+          else window.aiCore.setState('error');
           showEvaluation(data.evaluation);
           appendRuntimeLog(`message ok: ${text.slice(0, 36)}`);
           if (data.ui) {
@@ -5078,11 +5280,15 @@ HTML_PAGE = """<!doctype html>
           await refreshDocuments();
         } else {
           addBubble('assistant', data.error || 'error');
+          window.aiCore.setState('error');
+          window.workbench.complete(data);
           showEvaluation(data.evaluation);
           appendRuntimeLog(`message error: ${String(data.error || 'error').slice(0, 36)}`);
         }
       } catch (e) {
         typing.remove();
+        window.aiCore.setState('error');
+        window.workbench.fail();
         const detail = e && e.message ? ` (${e.message})` : '';
         addBubble('assistant', `通信に失敗しました。${detail}`);
         appendRuntimeLog(`network error${detail}`);
@@ -5192,7 +5398,7 @@ HTML_PAGE = """<!doctype html>
       addBubble('system', 'session reset');
     });
     messageInput.addEventListener('keydown', (event) => {
-      if (event.key === 'Enter' && !event.shiftKey) {
+      if (event.key === 'Enter' && !event.shiftKey && !event.isComposing && event.keyCode !== 229) {
         event.preventDefault();
         sendMessage();
       }
@@ -5237,7 +5443,9 @@ HTML_PAGE = """<!doctype html>
     setInterval(refreshStorage, 30000);
     setInterval(() => refreshGeoPanel(true, geoState.mode), 30 * 60 * 1000);
     setInterval(() => refreshDocuments(), 30000);
-    messageInput.focus();
+    window.initDashboard();
+    window.initWorkbench();
+    messageInput.focus({ preventScroll: true });
   </script>
 </body>
 </html>
@@ -5298,7 +5506,8 @@ class LocalAIServerHandler(BaseHTTPRequestHandler):
     self.send_response(200)
     self.send_header("Content-Type", "text/event-stream; charset=utf-8")
     self.send_header("Cache-Control", "no-cache, no-transform")
-    self.send_header("Connection", "keep-alive")
+    self.send_header("Connection", "close")
+    self.close_connection = True
     self.end_headers()
 
   def _send_sse_event(self, event: str, data: dict[str, Any]) -> None:
@@ -5337,6 +5546,28 @@ class LocalAIServerHandler(BaseHTTPRequestHandler):
         return
       file_path = os.path.join(base_dir, target)
       self._send_file(file_path)
+      return
+
+    if path in {"/site/dashboard/dashboard.css", "/site/dashboard/dashboard.js", "/site/dashboard/workbench.js"}:
+      self._send_file(os.path.join(os.path.dirname(__file__), "site", "dashboard", path.rsplit("/", 1)[-1]))
+      return
+
+    if path == '/processing/export.csv':
+      session_id = str((query.get('session_id') or [''])[0])
+      self._send_csv_text(processing_csv(session_id), filename='processing_timings.csv')
+      return
+
+    if path == '/processing/history':
+      session_id = str((query.get('session_id') or [''])[0])
+      self._send_json({'ok': True, 'records': processing_history(session_id)})
+      return
+
+    if path == "/system/metrics":
+      try:
+        payload = system_monitor.snapshot()
+        self._send_json(payload, status=200 if payload.get("ok") else 503)
+      except (OSError, RuntimeError):
+        self._send_json({"ok": False, "error": "PC情報を取得できませんでした。"}, status=503)
       return
 
     if path == "/health":
@@ -5449,7 +5680,7 @@ class LocalAIServerHandler(BaseHTTPRequestHandler):
   def do_POST(self) -> None:
     path = urlparse(self.path).path
 
-    if path not in {"/chat", "/chat/stream", "/sessions/clear", "/documents", "/evaluation/feedback"}:
+    if path not in {"/chat", "/chat/stream", "/sessions/clear", "/documents", "/evaluation/feedback", "/processing/client"}:
       self._send_json({"ok": False, "error": "not found"}, status=404)
       return
 
@@ -5457,6 +5688,16 @@ class LocalAIServerHandler(BaseHTTPRequestHandler):
     message = str(data.get("message", ""))
     experiment_mode = str(data.get("experiment_mode", "")).strip() or None
     test_case_id = str(data.get("test_case_id", "")).strip()
+    tool_request = data.get("tool_request") if isinstance(data.get("tool_request"), dict) else None
+
+    if path == '/processing/client':
+      timings = data.get('timings')
+      if not isinstance(timings, dict):
+        self._send_json({'ok': False, 'error': 'timings must be an object'}, status=400)
+        return
+      ok = save_client_timings(str(data.get('request_id') or ''), str(data.get('session_id') or ''), timings)
+      self._send_json({'ok': ok}, status=200 if ok else 404)
+      return
 
     if path == "/evaluation/feedback":
       request_id = str(data.get("request_id", "")).strip()
@@ -5506,12 +5747,23 @@ class LocalAIServerHandler(BaseHTTPRequestHandler):
         self._send_sse_event(event["event"], event["data"])
       return
 
+    if "text/event-stream" in self.headers.get("Accept", ""):
+      self._send_sse_headers()
+      try:
+        for event in _chat_activity_events(message, session_id, current_location=current_location,
+                                         experiment_mode=experiment_mode, test_case_id=test_case_id, tool_request=tool_request):
+          self._send_sse_event(event["event"], event["data"])
+      except (BrokenPipeError, ConnectionResetError):
+        pass
+      return
+
     response = _build_chat_payload(
       message,
       session_id,
       current_location=current_location,
       experiment_mode=experiment_mode,
       test_case_id=test_case_id,
+      tool_request=tool_request,
     )
     self._send_json(response, status=200 if response.get("ok") else 400)
 

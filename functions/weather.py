@@ -275,6 +275,16 @@ def _fmt_wind_speed(value):
     return f"{temp:.1f}m/s"
 
 
+def _fmt_wind_direction(value):
+    temp = _coerce_float(value)
+    if temp is None:
+        return None
+    degree = int(round(temp)) % 360
+    labels = ["北", "北北東", "北東", "東北東", "東", "東南東", "南東", "南南東", "南", "南南西", "南西", "西南西", "西", "西北西", "北西", "北北西"]
+    index = int((degree + 11.25) // 22.5) % 16
+    return f"{labels[index]} ({degree}°)"
+
+
 def _fmt_time(value):
     if value in (None, ""):
         return None
@@ -296,7 +306,7 @@ def _daily_value(daily_payload, key, index):
     return values[index]
 
 
-def _build_weather_response(details, location_label, target_date, weather_code, temperature, daily_max, daily_min, date_kind, request_url, current=None, daily=None):
+def _build_weather_response(details, location_label, target_date, weather_code, temperature, daily_max, daily_min, date_kind, request_url, current=None, daily=None, timezone_name=None, local_time_iso=None):
     weather_text = _weather_code_to_text(weather_code)
     date_label = {
         "today": "今日",
@@ -311,6 +321,7 @@ def _build_weather_response(details, location_label, target_date, weather_code, 
     target_iso = target_date.isoformat()
     current_payload = current or {}
     daily_payload = daily or {}
+    wind_direction = _coerce_float(current_payload.get("wind_direction_10m"))
 
     date_index = 0
     if date_kind != "today":
@@ -363,16 +374,15 @@ def _build_weather_response(details, location_label, target_date, weather_code, 
         lines.append(f"{humidity_label}：{_fmt_percent(humidity_value)}")
     if wind_speed is not None:
         lines.append(f"{wind_speed_label}：{_fmt_wind_speed(wind_speed)}")
+    wind_direction_text = _fmt_wind_direction(wind_direction)
+    if wind_direction_text:
+        lines.append(f"風向：{wind_direction_text}")
     if apparent is not None:
         lines.append(f"体感温度：{_fmt_temperature(apparent)}")
     if sunrise is not None:
         lines.append(f"日の出：{_fmt_time(sunrise)}")
     if sunset is not None:
         lines.append(f"日の入り：{_fmt_time(sunset)}")
-
-    event_text = _major_event_text(target_date)
-    if event_text:
-        lines.append(event_text)
 
     retrieval_time = datetime.datetime.now().strftime("%Y年%m月%d日 %H:%M")
     lines.append("")
@@ -384,6 +394,10 @@ def _build_weather_response(details, location_label, target_date, weather_code, 
         lines.append(f"対象地点：{location_label}（緯度{latitude}、経度{longitude}）")
     else:
         lines.append(f"対象地点：{location_label}")
+    if timezone_name:
+        lines.append(f"タイムゾーン：{timezone_name}")
+    if local_time_iso:
+        lines.append(f"現地時刻：{_fmt_time(local_time_iso) or local_time_iso}")
     lines.append(f"予報対象日：{target_date.strftime('%Y年%m月%d日')}")
     lines.append(f"取得日時：{retrieval_time}")
     lines.append(f"参照URL：{request_url}")
@@ -425,7 +439,7 @@ def get_weather(query: str | None = None, current_location_details: dict | None 
         "https://api.open-meteo.com/v1/forecast"
         f"?latitude={latitude}&longitude={longitude}"
         "&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,precipitation_sum,relative_humidity_2m_max,wind_speed_10m_max,sunrise,sunset"
-        "&current=temperature_2m,weather_code,relative_humidity_2m,apparent_temperature,wind_speed_10m"
+        "&current=temperature_2m,weather_code,relative_humidity_2m,apparent_temperature,wind_speed_10m,wind_direction_10m"
         "&temperature_unit=celsius"
         "&precipitation_unit=mm"
         "&wind_speed_unit=ms"
@@ -440,6 +454,8 @@ def get_weather(query: str | None = None, current_location_details: dict | None 
 
         current = payload.get("current", {})
         daily = payload.get("daily", {})
+        timezone_name = payload.get("timezone")
+        local_time_iso = current.get("time")
         weather_code = current.get("weather_code")
         temperature = current.get("temperature_2m")
         daily_max = daily.get("temperature_2m_max", [None])[0]
@@ -469,10 +485,11 @@ def get_weather(query: str | None = None, current_location_details: dict | None 
             url,
             current=current,
             daily=daily,
+            timezone_name=timezone_name,
+            local_time_iso=local_time_iso,
         )
 
     except (HTTPError, URLError, Exception):
-        event_text = _major_event_text(target_date)
         date_label = {
             "today": "今日",
             "tomorrow": "明日",
@@ -488,6 +505,4 @@ def get_weather(query: str | None = None, current_location_details: dict | None 
             f"取得日時：{datetime.datetime.now().strftime('%Y年%m月%d日 %H:%M')}\n"
             f"参照URL：{url}"
         )
-        if event_text:
-            return f"{base}{event_text}{footer}"
         return f"{base}{footer}"

@@ -29,9 +29,10 @@ class TransitUrlTests(unittest.TestCase):
         original_yahoo_summary = transit._yahoo_transit_summary
         original_osrm_route_data = transit._osrm_route_data
         try:
-            transit._resolve_origin = lambda origin, current_location="": (
+            transit._resolve_origin = lambda origin, current_location="", current_location_details=None: (
                 "Kyoto / Kyoto Prefecture / Japan",
                 (35.0116, 135.7681),
+                None,
             )
             transit._geocode = lambda destination: (35.6812, 139.7671)
             transit._yahoo_transit_summary = lambda origin, destination: "公共交通機関: 取得できませんでした。"

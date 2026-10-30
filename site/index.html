@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>卒業研究 | 音声対話AIアシスタント</title>
+    <title>卒業研究 | 対話AIアシスタント</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
@@ -17,9 +17,9 @@
 
     <header class="hero reveal">
       <p class="eyebrow">GRADUATION RESEARCH</p>
-      <h1>音声対話AIアシスタントの実装と統合</h1>
+      <h1>対話AIアシスタントの実装と統合</h1>
       <p class="lead">
-        本研究は、音声入力から意図分類、外部機能呼び出し、応答生成までを
+        本研究は、テキスト入力から意図分類、外部機能呼び出し、応答生成までを
         一貫して扱う日本語対話システムを、ローカル中心で構築したものです。
       </p>
       <div class="hero-actions">
@@ -32,7 +32,7 @@
       <section class="panel reveal" id="overview">
         <h2>研究背景と目的</h2>
         <p>
-          音声アシスタントは利便性が高い一方で、ネットワーク依存や応答遅延、
+          対話アシスタントは利便性が高い一方で、ネットワーク依存や応答遅延、
           個人情報管理の課題があります。そこで本研究では、ローカル処理を優先しつつ、
           必要時のみクラウドを補助利用するハイブリッド型対話基盤を設計・実装しました。
         </p>
@@ -41,7 +41,7 @@
       <section class="panel reveal">
         <h2>システム構成</h2>
         <div class="chips" role="list" aria-label="system architecture">
-          <span class="chip" role="listitem">音声入力 (ASR)</span>
+          <span class="chip" role="listitem">テキスト入力</span>
           <span class="chip" role="listitem">意図分類</span>
           <span class="chip" role="listitem">関数ルーティング</span>
           <span class="chip" role="listitem">ローカルLLM応答</span>
@@ -53,7 +53,7 @@
       <section class="panel reveal">
         <h2>主要実装機能</h2>
         <ol>
-          <li>リアルタイム音声認識と部分文字起こし表示</li>
+          <li>テキスト入力による対話処理</li>
           <li>時刻・曜日・計算・現在地・天気などの関数実行</li>
           <li>Web検索・ナビ連携・MCPサーバー経由のツール提供</li>
           <li>会話履歴とユーザープロファイルの継続的な反映</li>
@@ -69,7 +69,7 @@
         </p>
         <div class="result" aria-live="polite">
           <ul class="links">
-            <li><a href="https://github.com/ht24a023/Graduation-research/blob/main/main.py" target="_blank" rel="noopener noreferrer">音声対話エントリーポイント (main.py)</a></li>
+            <li><a href="https://github.com/ht24a023/Graduation-research/blob/main/main.py" target="_blank" rel="noopener noreferrer">対話エントリーポイント (main.py)</a></li>
             <li><a href="https://github.com/ht24a023/Graduation-research/blob/main/local_ai_server.py" target="_blank" rel="noopener noreferrer">ローカルWeb UIサーバー (local_ai_server.py)</a></li>
             <li><a href="https://github.com/ht24a023/Graduation-research/blob/main/mcp_server.py" target="_blank" rel="noopener noreferrer">MCPサーバー実装 (mcp_server.py)</a></li>
             <li><a href="https://github.com/ht24a023/Graduation-research/blob/main/models/user_profile_memory.py" target="_blank" rel="noopener noreferrer">ユーザーメモリ機能 (user_profile_memory.py)</a></li>
@@ -79,7 +79,7 @@
     </main>
 
     <footer>
-      <p>卒業研究テーマ: ローカル優先の日本語音声対話システム実装。</p>
+      <p>卒業研究テーマ: ローカル優先の日本語対話システム実装。</p>
     </footer>
 
     <script src="script.js"></script>

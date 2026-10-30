@@ -288,7 +288,7 @@ class LocalAIServerTests(unittest.TestCase):
         self.assertEqual(result["ui"]["type"], "prompt_input")
 
     def test_chinese_search_prompt_completes_local_search_when_results_exist(self):
-        with patch.object(
+        with patch.object(local_ai_server, "search_google_web_structured", return_value={"ok": False, "error_type": "test_fallback"}), patch.object(
             local_ai_server,
             "search_google_web",
             return_value="入力文の日本語訳：エッジAIとは何かを検索し、日本語で要約してください。\n日本語訳：エッジAIは端末側で推論を行う技術です。\n日本語による要約：エッジAIは端末側で推論を行う技術です。\n参照リンク：https://example.com/edge-ai",
@@ -301,7 +301,7 @@ class LocalAIServerTests(unittest.TestCase):
         self.assertIn("参照リンク", result["response"])
 
     def test_korean_search_prompt_completes_local_search_when_results_exist(self):
-        with patch.object(
+        with patch.object(local_ai_server, "search_google_web_structured", return_value={"ok": False, "error_type": "test_fallback"}), patch.object(
             local_ai_server,
             "search_google_web",
             return_value="入力文の日本語訳：エッジAIとは何かを検索して、日本語で要約してください。\n日本語訳：エッジAIは端末側で推論を行う技術です。\n日本語による要約：エッジAIは端末側で推論を行う技術です。\n参照リンク：https://example.com/edge-ai",

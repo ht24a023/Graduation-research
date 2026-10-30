@@ -7,6 +7,7 @@ from urllib.error import URLError, HTTPError
 from urllib.request import Request, urlopen
 
 from config import OLLAMA_HOST, OLLAMA_MODEL, OLLAMA_TIMEOUT
+from models.execution_trace import traced_stage
 
 
 def _build_request(prompt: str, temperature: float, stream: bool, response_format: str | None = None) -> Request:
@@ -30,6 +31,7 @@ def _build_request(prompt: str, temperature: float, stream: bool, response_forma
     )
 
 
+@traced_stage('local_llm')
 def ask_local_llm(prompt: str, temperature: float = 0.7, timeout: float | None = None) -> str:
     """Send a prompt to Ollama and return the assistant response.
 
@@ -67,6 +69,7 @@ def ask_local_llm(prompt: str, temperature: float = 0.7, timeout: float | None =
         return f"（ローカルLLMエラー: {error}）"
 
 
+@traced_stage('local_llm')
 def ask_local_llm_json(prompt: str, timeout: float | None = None) -> dict | None:
     request = _build_request(prompt, temperature=0.0, stream=False, response_format="json")
     effective_timeout = OLLAMA_TIMEOUT if timeout is None else timeout

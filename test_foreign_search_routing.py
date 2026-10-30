@@ -48,7 +48,10 @@ class ForeignSearchRoutingTests(unittest.TestCase):
 
     def test_search_failure_returns_search_failed_route(self):
         with patch.object(google_workspace, "_translate_with_fallback", return_value={"ok": True, "translated_text": "エッジAIとクラウドAIの違いを検索してください。"}), \
-            patch.object(google_workspace, "_search_google_web_impl", return_value="検索結果を取得できませんでした。"):
+            patch.object(google_workspace, "_search_google_web_impl", return_value="検索結果を取得できませんでした。"), \
+            patch.object(google_workspace, "_search_duckduckgo_lite", return_value="検索結果を取得できませんでした。"), \
+            patch.object(google_workspace, "_search_bing", return_value="検索結果を取得できませんでした。"), \
+            patch.object(google_workspace, "_search_duckduckgo_instant_api", return_value="検索結果を取得できませんでした。"):
             result = google_workspace.search_google_web_structured("Search for the differences between Edge AI and Cloud AI.")
 
         self.assertFalse(result["ok"])

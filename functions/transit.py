@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """経路案内の目的地抽出とルート生成を行う関数群で、移動案内を支えます。"""
 
 """
@@ -7,7 +9,6 @@ transit.py — APIキー不要の経路検索モジュール
 公共交通:       Yahoo乗換案内 HTML スクレイピング
 フォールバック: Google Maps API（GOOGLE_MAPS_API_KEY が設定されている場合のみ）
 """
-from __future__ import annotations
 
 import json
 import os
