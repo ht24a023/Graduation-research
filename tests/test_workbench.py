@@ -125,3 +125,17 @@ def test_nested_llm_timing_is_not_double_counted_as_tool_time():
     assert tool['duration_sec']>=llm['duration_sec']
     assert tool['exclusive_sec']<tool['duration_sec']
     assert payload['execution']['stage_totals']['tool']+payload['execution']['stage_totals']['local_llm']<=payload['execution']['server_elapsed_sec']
+
+
+def test_repeated_system_request_refreshes_metrics_and_result_card(monkeypatch):
+    monkeypatch.setattr(server, '_RESPONSE_CACHE', {})
+    samples=[{'ok':True,'cpu':{'usage_percent':10},'memory':{'usage_percent':20}},
+             {'ok':True,'cpu':{'usage_percent':80},'memory':{'usage_percent':30}}]
+    with patch.object(server.system_monitor,'snapshot',side_effect=samples) as monitor:
+        first=server._build_chat_payload('CPUの使用率を教えて','live-repeat')
+        second=server._build_chat_payload('CPUの使用率を教えて','live-repeat')
+    assert monitor.call_count==2
+    assert first['cards'][0]['data']['cpu']['usage_percent']==10
+    assert second['cards'][0]['data']['cpu']['usage_percent']==80
+    assert first['cards'][0]['event_id']!=second['cards'][0]['event_id']
+    assert not second.get('cache',{}).get('hit')

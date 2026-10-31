@@ -1,0 +1,15 @@
+const assert=require('node:assert/strict');
+const T=require('../site/dashboard/task_state.js');
+let s=T.blank();const timer=T.addTimer(s,{id:'a',label:'work',duration:60000},1000);
+assert.equal(T.remaining(timer,11000),50000);
+T.toggleTimer(timer,21000);assert.equal(T.remaining(timer,31000),40000);
+T.toggleTimer(timer,31000);assert.equal(timer.deadline,71000);
+assert.deepEqual(T.tick(s,70999),[]);assert.deepEqual(T.tick(s,71000),['a']);assert.equal(timer.finished,true);assert.deepEqual(T.tick(s,80000),[]);
+T.toggleTimer(timer,80000);assert.equal(timer.deadline,140000);T.resetTimer(timer);assert.equal(timer.deadline,null);assert.equal(timer.remaining,60000);
+T.toggleWatch(s,1000);assert.equal(T.elapsed(s,3500),2500);T.lap(s,3500);T.toggleWatch(s,5000);assert.equal(T.elapsed(s,7000),4000);T.toggleWatch(s,8000);assert.equal(T.elapsed(s,9000),5000);
+const restored=T.restore(JSON.parse(JSON.stringify(s)));assert.equal(T.elapsed(restored,10000),6000);assert.deepEqual(restored.stopwatch.laps,[2500]);
+assert.equal(T.restore({version:1,timers:[{id:'bad',duration:NaN,remaining:1}],stopwatch:{elapsed:-1}}).timers.length,0);
+assert.throws(()=>T.addTimer(s,{id:'bad',duration:999},0));assert.throws(()=>T.addTimer(s,{id:'bad',duration:86400001},0));
+assert.equal(T.format(3661234,true),'01:01:01.2');assert.equal(T.format(-1),'00:00:00');
+const paused=T.blank();assert.throws(()=>T.lap(paused,1));
+console.log('Timer/stopwatch invariants: passed (pause, resume, expiry, restart, laps, reload, invalid data, duration limits).');

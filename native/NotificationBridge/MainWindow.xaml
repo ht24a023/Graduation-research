@@ -1,0 +1,9 @@
+<Window x:Class="NotificationBridge.MainWindow" xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" Title="J.A.R.V.I.S. 通知アクセス" Width="540" Height="350" ResizeMode="CanMinimize" Background="#091724" Foreground="#CDEEF9">
+ <StackPanel Margin="28">
+  <TextBlock Text="J.A.R.V.I.S. / WINDOWS NOTIFICATIONS" FontSize="17" FontWeight="Bold" Foreground="#6DDBEF"/>
+  <TextBlock Margin="0,18,0,12" TextWrapping="Wrap" Text="許可すると、Windowsの通知センターにあるアプリ通知を、このPCのJ.A.R.V.I.S.画面へ渡します。通知本文はファイルへ保存せず、外部サーバーへ送りません。取得するのはWeb UIの通知設定がオンの間だけです。"/>
+  <Button x:Name="AllowButton" Content="Windowsの通知アクセスを許可する" Padding="12,9" HorizontalAlignment="Left" Click="Allow_Click"/>
+  <TextBlock x:Name="StatusText" Margin="0,16,0,12" TextWrapping="Wrap" Text="接続を確認しています…"/>
+  <TextBlock FontSize="11" Foreground="#8AABBC" TextWrapping="Wrap" Text="この補助アプリを閉じると通知取得は停止します。Windows通知自体の削除・既読化・設定変更は行いません。"/>
+ </StackPanel>
+</Window>

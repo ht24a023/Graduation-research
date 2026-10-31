@@ -56,8 +56,11 @@ from models.evaluation_metrics import build_user_facing_evaluation, evaluation_m
 
 
 from functions.system_monitor import system_monitor
+from functions.desktop_integration import system_clock, notification_hub
 from functions.research_tools import translate_text_structured, wikipedia_summary
 from functions.dashboard_tools import youtube_results, local_qr
+from functions.reply_style import normalize_style, style_prompt
+from functions import mission_control, apple_sync
 from models.execution_trace import (traced_request, run_stage, add_card, mark_text_ready,
                                     event_sink, processing_history, save_client_timings, processing_csv)
 
@@ -81,6 +84,14 @@ def _tool_call(kind, function, *args, **kwargs):
 
 
 def _parse_dashboard_request(text):
+    if text.strip() in {'タスク一覧','予定一覧','ミッション一覧'}:
+        return {'kind':'mission','action':'list'}
+    match = re.fullmatch(r'タスク追加[：:]\s*(.+)', text.strip(), re.S)
+    if match:
+        return {'kind':'mission','action':'add','title':match.group(1),'item_kind':'task'}
+    match = re.fullmatch(r'文書検索[：:]\s*(.+)', text.strip(), re.S)
+    if match:
+        return {'kind':'knowledge','query':match.group(1)}
     # これは実行するツールの選択。カードは実行後の戻り値からのみ作る。
     if re.search(r'(?:CPU|GPU|RAM|メモリ|ディスク|ネットワーク).*(?:使用|状態|温度|空き)|システム(?:情報|モニター)', text, re.I):
         return {'kind': 'system'}
@@ -107,6 +118,14 @@ def _parse_dashboard_request(text):
 def _dispatch_dashboard_tool(request):
     kind = str(request.get('kind') or '')
     query = str(request.get('query') or '')[:4000]
+    if kind == 'mission':
+        result = _tool_call('mission', mission_control.board, request.get('action','list'),
+                            {'title':request.get('title'), 'kind':request.get('item_kind','task')})
+        items = [item for item in result['items'] if not item['done']]
+        return True, ('タスクを追加しました。\n' if request.get('action')=='add' else '') + ('\n'.join(item['title'] + (' / '+item['due'] if item.get('due') else '') for item in items[:20]) or '未完了の予定・タスクはありません。')
+    if kind == 'knowledge':
+        result = _tool_call('knowledge', mission_control.knowledge_search, query)
+        return True, '\n\n'.join(item['title']+'\n'+item['snippet'] for item in result['results']) or '保存文書に一致はありません。'
     if kind == 'translate':
         text = str(request.get('text') or '')[:10000]
         source = str(request.get('source_lang') or 'auto')
@@ -298,6 +317,10 @@ _LOCATION_WEATHER_CACHE: dict[str, Any] = {
   "expires_at": 0.0,
   "cache_key": "",
 }
+_RESPONSE_CACHE_TTL_SECONDS = max(10, int(os.getenv("RESPONSE_CACHE_TTL_SECONDS", "120")))
+_RESPONSE_CACHE_MAX_ITEMS = max(20, int(os.getenv("RESPONSE_CACHE_MAX_ITEMS", "200")))
+_RESPONSE_CACHE: dict[str, dict[str, Any]] = {}
+_RESPONSE_CACHE_ORDER: deque[str] = deque()
 
 API_APPROVE_PREFIX = "__API_APPROVE__"
 API_REJECT_PREFIX = "__API_REJECT__"
@@ -372,6 +395,10 @@ _NAVIGATION_PLACEHOLDER_PATTERNS = (
   "目的地",
   "行き先",
 )
+_SEARCH_FALLBACK_BLOCKLIST = {
+  "Google検索結果を取得できませんでした。",
+  "入力された文章を日本語へ翻訳できませんでした。日本語で入力し直すか、翻訳を再試行してください。",
+}
 _CLARIFICATION_TEMPLATE_RE = re.compile(
   r"^元の依頼：(?P<original>.+?)\n追加情報：(?P<extra>.+?)\n上記の追加情報を使って元の依頼を再計算してください。?$",
   re.DOTALL,
@@ -396,6 +423,96 @@ def _append_turn(session_id: str, role: str, content: str) -> None:
 def _snapshot_session(session_id: str) -> list[dict[str, str]]:
   with _SESSION_LOCK:
     return list(_get_history(session_id))
+
+
+def _build_response_cache_key(
+  *,
+  session_id: str,
+  message: str,
+  current_location: str,
+  experiment_mode: str,
+  turbo_mode: bool,
+) -> str:
+  normalized = re.sub(r"\s+", " ", (message or "").strip().lower())
+  location = re.sub(r"\s+", " ", (current_location or "").strip().lower())
+  mode = (experiment_mode or "").strip().upper()
+  return "|".join([
+    session_id.strip(),
+    mode,
+    "turbo" if turbo_mode else "balanced",
+    location,
+    normalized,
+  ])
+
+
+def _is_cacheable_message(message: str) -> bool:
+  text = (message or "").strip()
+  if len(text) < 6 or len(text) > 400:
+    return False
+  if re.search(r"(今何時|現在時刻|今日|明日|明後日|昨日|天気|気温|湿度|ここから|行き方|ルート|経路|保存して|削除して|更新して)", text):
+    return False
+  return True
+
+
+def _get_cached_response(cache_key: str) -> dict[str, Any] | None:
+  now = time.time()
+  with _SESSION_LOCK:
+    cached = _RESPONSE_CACHE.get(cache_key)
+    if not cached:
+      return None
+    expires_at = float(cached.get("expires_at") or 0.0)
+    if expires_at <= now:
+      _RESPONSE_CACHE.pop(cache_key, None)
+      return None
+    return {
+      "route": str(cached.get("route") or "local_llm"),
+      "response": str(cached.get("response") or ""),
+      "ui": cached.get("ui"),
+      "followups": cached.get("followups") if isinstance(cached.get("followups"), list) else None,
+      "age_sec": max(0.0, now - float(cached.get("cached_at") or now)),
+    }
+
+
+def _run_search_with_fallback(message: str) -> tuple[dict[str, Any], str]:
+  search_payload = _tool_call('search', search_google_web_structured, message)
+  fallback_search_result = ""
+  if not search_payload.get("ok") or str(search_payload.get("search_engine") or "") == "Demo":
+    fallback_search_result = run_stage('tool', search_google_web, message, tool_name='search_fallback')
+  if (
+    search_payload.get("ok")
+    and str(search_payload.get("search_engine") or "") == "Demo"
+    and fallback_search_result
+    and fallback_search_result not in _SEARCH_FALLBACK_BLOCKLIST
+  ):
+    search_payload = {
+      **search_payload,
+      "summary_ja": fallback_search_result,
+      "search_engine": "Google",
+    }
+  return search_payload, fallback_search_result
+
+
+def _set_cached_response(cache_key: str, payload: dict[str, Any]) -> None:
+  now = time.time()
+  route = str(payload.get("route") or "")
+  response = str(payload.get("response") or "")
+  if not route or not response:
+    return
+
+  with _SESSION_LOCK:
+    _RESPONSE_CACHE[cache_key] = {
+      "route": route,
+      "response": response,
+      "ui": payload.get("ui") if isinstance(payload.get("ui"), dict) else None,
+      "followups": payload.get("followups") if isinstance(payload.get("followups"), list) else None,
+      "cached_at": now,
+      "expires_at": now + _RESPONSE_CACHE_TTL_SECONDS,
+    }
+    _RESPONSE_CACHE_ORDER.append(cache_key)
+    while len(_RESPONSE_CACHE_ORDER) > _RESPONSE_CACHE_MAX_ITEMS:
+      stale_key = _RESPONSE_CACHE_ORDER.popleft()
+      if stale_key != cache_key:
+        _RESPONSE_CACHE.pop(stale_key, None)
 
 
 def _clear_session(session_id: str) -> bool:
@@ -973,6 +1090,28 @@ def _sanitize_label(value: str) -> str:
   return label[:120]
 
 
+def _resolve_manual_location_context(current_location: str | None, fallback_details: dict[str, Any] | None = None) -> dict[str, Any] | None:
+  manual_label = _sanitize_label(current_location or "")
+  if not manual_label:
+    return fallback_details if isinstance(fallback_details, dict) else None
+
+  details = dict(fallback_details or {}) if isinstance(fallback_details, dict) else {}
+  if not any(value for value in [details.get("city"), details.get("region"), details.get("country"), details.get("latitude"), details.get("longitude")]):
+    details = {}
+
+  manual_details = {
+    "city": details.get("city") or manual_label,
+    "region": details.get("region") or "",
+    "country": details.get("country") or "",
+    "latitude": _to_float_or_none(details.get("latitude")),
+    "longitude": _to_float_or_none(details.get("longitude")),
+    "provider": "manual",
+    "source": "manual",
+    "manual_label": manual_label,
+  }
+  return manual_details
+
+
 def _location_weather_cache_key(mode: str, details: dict[str, Any], manual_label: str, reason: str) -> str:
   lat = _to_float_or_none(details.get("latitude"))
   lon = _to_float_or_none(details.get("longitude"))
@@ -997,14 +1136,34 @@ def _build_location_weather_payload(
   if mode not in {"device", "ip", "manual"}:
     mode = "ip"
 
+  manual_text = _sanitize_label(manual_label)
   details = dict(location_details or {}) if isinstance(location_details, dict) else {}
+
+  if manual_text:
+    mode = "manual"
+    if not details:
+      details = {
+        "city": manual_text,
+        "region": "",
+        "country": "",
+        "latitude": None,
+        "longitude": None,
+        "provider": "manual",
+      }
+    else:
+      details = dict(details)
+      details["city"] = manual_text
+      details["region"] = details.get("region") or ""
+      details["country"] = details.get("country") or ""
+      details["provider"] = "manual"
+      details["manual_label"] = manual_text
 
   if mode == "ip" and not details:
     details = get_location_details(use_cache=True) or {}
 
   if mode == "manual" and not details:
     details = {
-      "city": manual_label,
+      "city": manual_text or "手動指定",
       "region": "",
       "country": "",
       "latitude": None,
@@ -1140,8 +1299,8 @@ def _build_location_weather_payload(
   return payload
 
 
-def _generate_llm_response(prompt: str) -> dict[str, Any]:
-  retry_count = max(1, MAX_RETRIES)
+def _generate_llm_response(prompt: str, retry_count_override: int | None = None) -> dict[str, Any]:
+  retry_count = max(1, int(retry_count_override if retry_count_override is not None else MAX_RETRIES))
   attempts: list[dict[str, Any]] = []
   for attempt_index in range(retry_count):
     if attempt_index == 0:
@@ -1189,6 +1348,157 @@ def _route_label(route: str) -> str:
     "error": "エラー",
   }
   return mapping.get(route, route)
+
+
+def _assist_templates_for_intent(intent: str, tool_request: dict[str, Any] | None) -> list[str]:
+  capability_map = {
+    "time": "time",
+    "weekday": "weekday",
+    "relative_weekday": "weekday",
+    "calculate": "calc",
+    "navigation": "route",
+    "search": "search",
+    "weather": "time",
+  }
+
+  if tool_request and tool_request.get("kind") == "translate":
+    return ["次の文章を英語に翻訳して：", "次の文章を日本語に翻訳して：", "専門用語を自然な日本語に言い換えて："]
+
+  if tool_request and tool_request.get("kind") == "youtube":
+    return ["YouTubeで最新の研究発表を検索して", "YouTubeでチュートリアルを探して", "YouTubeで比較動画を探して"]
+
+  if tool_request and tool_request.get("kind") == "qr":
+    return ["https://example.com をQRコードにして", "次の文字列をQRにして：", "連絡先テキストをQRコード化して"]
+
+  key = capability_map.get(intent)
+  if key:
+    for item in CAPABILITY_ITEMS:
+      if item.get("id") == key:
+        template = str(item.get("template") or "").strip()
+        if template:
+          return [
+            template,
+            "同じ内容を短く要約して",
+            "この結果を箇条書きで3点にして",
+          ]
+
+  return [
+    "この質問を最短で解く手順を3つに分けて",
+    "先に結論、あとで理由を説明して",
+    "必要なら検索して、参照元つきで答えて",
+  ]
+
+
+def _build_followup_suggestions(*, route: str, message: str, response_text: str) -> list[dict[str, str]]:
+  msg = (message or "").strip()
+  response = (response_text or "").strip()
+
+  suggestions: list[dict[str, str]] = []
+
+  def push(label: str, followup_message: str, description: str) -> None:
+    if not label or not followup_message:
+      return
+    if any(item.get("message") == followup_message for item in suggestions):
+      return
+    suggestions.append({
+      "label": label,
+      "message": followup_message,
+      "description": description,
+    })
+
+  if route == "local_search" or route == "search_failed":
+    push("要点を3行で再要約", f"次を3行で要約して：\n{response[:300]}", "検索結果の要点だけを短く確認")
+    push("参照元ごとの差分を比較", f"次の内容の相違点を比較して：\n{response[:300]}", "複数情報源の違いを整理")
+    push("追加検索キーワードを提案", f"この質問「{msg}」の追加検索キーワードを5個提案して", "深掘り用の検索語を提案")
+  elif "天気" in msg or route == "local_function" and re.search(r"(天気|降水|湿度|風)", response):
+    push("明日の天気を確認", "明日の天気を教えて", "同じ地域の翌日予報を確認")
+    push("服装アドバイスを作成", f"次の天気情報をもとに服装の提案をして：\n{response[:260]}", "実用的な行動提案に変換")
+    push("雨対策を確認", f"次の天気で雨対策が必要か判定して：\n{response[:260]}", "持ち物を事前に確認")
+  elif route == "local_llm":
+    push("結論を1文に圧縮", f"次の回答の結論だけを1文にして：\n{response[:320]}", "回答の要点だけを即確認")
+    push("実行ステップ化", f"次の内容を今すぐ実行できる手順にして：\n{response[:320]}", "行動に落とし込む")
+    push("30秒説明に変換", f"次の内容を30秒で説明できる口語にして：\n{response[:320]}", "プレゼン用に圧縮")
+  else:
+    push("この回答を要約", f"次の回答を短く要約して：\n{response[:320]}", "情報の再確認")
+    push("次にやることを提案", f"この内容の次にやることを3つ提案して：\n{response[:320]}", "実行可能な次アクションを抽出")
+    push("不足情報を確認", f"この回答に不足している情報があるか確認して：\n{response[:320]}", "品質チェック")
+
+  return suggestions[:3]
+
+
+def _build_chat_assist_payload(message: str, session_id: str, current_location: str = "") -> dict[str, Any]:
+  normalized = str(message or "").strip()
+  if not normalized:
+    return {
+      "ok": True,
+      "input": "",
+      "intent": "idle",
+      "route_hint": "local_llm",
+      "route_label": _route_label("local_llm"),
+      "confidence": 0.0,
+      "analysis": "入力待機中です。",
+      "suggestions": [
+        "このローカルサーバーでできることを具体例つきで教えて",
+        "ここから東京駅までの行き方を教えて",
+        "保存してある自己PR文書を一覧で見せて",
+      ],
+      "context": {
+        "session_id": session_id,
+        "current_location": current_location,
+        "has_pending_api_approval": _has_pending_api_approval_for_session(session_id),
+      },
+    }
+
+  tool_request = _parse_dashboard_request(normalized)
+  intent = classify_intent(normalized)
+
+  route_hint = "local_llm"
+  if tool_request:
+    route_hint = "local_function"
+  elif intent in {"time", "weekday", "relative_weekday", "calculate", "navigation", "weather", "location", "search"}:
+    route_hint = "local_function" if intent != "search" else "local_search"
+  elif re.search(r"(調べて|検索|最新|とは|意味|違い|比較|ニュース)", normalized) and not _prefer_local_llm_over_search(normalized):
+    route_hint = "local_search"
+  elif re.search(r"(オフライン|ローカルのみ|このPC|端末内)", normalized):
+    route_hint = "local_function"
+
+  confidence = 0.52
+  if tool_request:
+    confidence += 0.3
+  if intent in {"time", "weekday", "relative_weekday", "calculate", "navigation", "weather", "location", "search"}:
+    confidence += 0.18
+  if len(normalized) >= 20:
+    confidence += 0.05
+  if len(normalized) <= 6:
+    confidence -= 0.08
+  confidence = max(0.08, min(0.97, round(confidence, 2)))
+
+  tool_kind = str((tool_request or {}).get("kind") or "")
+  if tool_kind:
+    analysis = f"{tool_kind}系ツールとして処理できる入力を検出しました。"
+  elif route_hint == "local_search":
+    analysis = "事実確認系の質問として検索優先で処理できそうです。"
+  elif route_hint == "local_function":
+    analysis = "ルールベースのローカル機能で高速処理できる可能性が高いです。"
+  else:
+    analysis = "自由対話としてローカルLLMへ渡す想定です。"
+
+  return {
+    "ok": True,
+    "input": normalized,
+    "intent": intent,
+    "route_hint": route_hint,
+    "route_label": _route_label(route_hint),
+    "confidence": confidence,
+    "analysis": analysis,
+    "tool_kind": tool_kind or None,
+    "suggestions": _assist_templates_for_intent(intent, tool_request),
+    "context": {
+      "session_id": session_id,
+      "current_location": current_location,
+      "has_pending_api_approval": _has_pending_api_approval_for_session(session_id),
+    },
+  }
 
 
 def _resolve_routing_mode(mode_override: str | None = None) -> str:
@@ -1437,7 +1747,10 @@ def _build_chat_payload(
   experiment_mode: str | None = None,
   test_case_id: str = "",
   tool_request: dict | None = None,
+  turbo_mode: bool = False,
+  reply_style: str = "standard",
 ) -> dict[str, Any]:
+  reply_style = normalize_style(reply_style)
   message = (message or "").strip()
   current_location = (current_location or "").strip()
   if not message:
@@ -1457,11 +1770,24 @@ def _build_chat_payload(
 
   request_id = uuid4().hex
   experiment_mode = _resolve_routing_mode(experiment_mode)
+  turbo_mode = bool(turbo_mode)
   test_case_id = (test_case_id or "").strip()
   started = time.perf_counter()
   local_time_sec = 0.0
   cloud_time_sec = 0.0
   api_called = False
+
+  cache_key = _build_response_cache_key(
+    session_id=session_id,
+    message=effective_message,
+    current_location=current_location,
+    experiment_mode=experiment_mode,
+    turbo_mode=turbo_mode,
+  )
+  cache_key += "|reply-style=" + reply_style
+  requested_tool = tool_request or run_stage('intent', _parse_dashboard_request, effective_message)
+  # Live/tool results must be obtained again, including their result cards.
+  cacheable_request = _is_cacheable_message(effective_message) and not clarification_followup and not requested_tool
 
   def finalize(
     *,
@@ -1482,13 +1808,26 @@ def _build_chat_payload(
       "experiment_mode": experiment_mode,
       "test_case_id": test_case_id,
       "route": route,
+      "performance_mode": "turbo" if turbo_mode else "balanced",
+      "reply_style": reply_style,
     }
     if ok:
       payload["response"] = response_text
+      if extra and isinstance(extra.get("followups"), list):
+        payload["followups"] = extra.get("followups")
+      else:
+        followups = _build_followup_suggestions(route=route, message=message, response_text=response_text)
+        if followups:
+          payload["followups"] = followups
     else:
       payload["error"] = response_text or "error"
     if extra:
       payload.update(extra)
+
+    if ok and cacheable_request and route in {"local_llm", "local_search", "local_function"}:
+      ui_type = str(getattr(payload.get("ui"), "get", lambda *args, **kwargs: "")("type") or "") if isinstance(payload.get("ui"), dict) else ""
+      if ui_type != "cloud_api_consent":
+        _set_cached_response(cache_key, payload)
 
     mark_text_ready()
     elapsed = time.perf_counter() - started
@@ -1507,7 +1846,26 @@ def _build_chat_payload(
       success=ok,
     )
 
-  requested_tool = tool_request or run_stage('intent', _parse_dashboard_request, effective_message)
+  if not tool_request and not approve_token and not reject_token and cacheable_request:
+    cached = _get_cached_response(cache_key)
+    if cached and cached.get("response"):
+      update_profile_from_text(effective_message)
+      _append_turn(session_id, "user", message)
+      _append_turn(session_id, "assistant", str(cached.get("response") or ""))
+      return finalize(
+        ok=True,
+        route=str(cached.get("route") or "local_llm"),
+        response=str(cached.get("response") or ""),
+        extra={
+          "ui": cached.get("ui") if isinstance(cached.get("ui"), dict) else None,
+          "followups": cached.get("followups") if isinstance(cached.get("followups"), list) else None,
+          "cache": {
+            "hit": True,
+            "age_sec": round(float(cached.get("age_sec") or 0.0), 2),
+          },
+        },
+      )
+
   if requested_tool:
     try:
       tool_started = time.perf_counter()
@@ -1526,6 +1884,7 @@ def _build_chat_payload(
 
     cloud_started = time.perf_counter()
     try:
+      reply_style = normalize_style(pending.get("reply_style", "standard"))
       cloud_response = ask_cloud_ai(str(pending.get("prompt", "")))
       cloud_time_sec += time.perf_counter() - cloud_started
       api_called = True
@@ -1655,6 +2014,7 @@ def _build_chat_payload(
       navigation_input = f"ここから{clarification_followup[1]}までの行き方を教えて"
     location_details = _get_session_location_details(session_id)
     if current_location:
+      location_details = _resolve_manual_location_context(current_location, location_details)
       navigation_input = navigation_input.replace("ここから", f"{current_location}から")
     local_started = time.perf_counter()
     response = _tool_call('map', resolve_navigation,
@@ -1668,6 +2028,8 @@ def _build_chat_payload(
 
   if intent == "weather":
     location_details = _get_session_location_details(session_id)
+    if current_location:
+      location_details = _resolve_manual_location_context(current_location, location_details)
     weather_query = recompute_message
     if current_location and not parse_weather_query(recompute_message).get("location"):
       weather_query = current_location + "の天気"
@@ -1690,18 +2052,8 @@ def _build_chat_payload(
 
   if intent == "search" and not prefer_local_llm:
     local_started = time.perf_counter()
-    search_payload = _tool_call('search', search_google_web_structured, recompute_message)
+    search_payload, fallback_search_result = _run_search_with_fallback(recompute_message)
     local_time_sec += time.perf_counter() - local_started
-    fallback_search_result = run_stage('tool', search_google_web, recompute_message, tool_name='search_fallback') if not search_payload.get('ok') or search_payload.get('search_engine') == 'Demo' else ''
-    if search_payload.get("ok") and str(search_payload.get("search_engine") or "") == "Demo" and fallback_search_result and fallback_search_result not in {
-      "Google検索結果を取得できませんでした。",
-      "入力された文章を日本語へ翻訳できませんでした。日本語で入力し直すか、翻訳を再試行してください。",
-    }:
-      search_payload = {
-        **search_payload,
-        "summary_ja": fallback_search_result,
-        "search_engine": "Google",
-      }
     if search_payload.get("ok"):
       route_label = "local_search"
       response_text = _format_structured_search_response(search_payload)
@@ -1709,10 +2061,7 @@ def _build_chat_payload(
       print(f"route={route_label}")
       return finalize(ok=True, route=route_label, response=response_text, extra={"ui": _build_search_success_ui()})
 
-    if fallback_search_result and fallback_search_result not in {
-      "Google検索結果を取得できませんでした。",
-      "入力された文章を日本語へ翻訳できませんでした。日本語で入力し直すか、翻訳を再試行してください。",
-    }:
+    if fallback_search_result and fallback_search_result not in _SEARCH_FALLBACK_BLOCKLIST:
       route_label = "local_search"
       add_card("search", {"text": fallback_search_result, "query": recompute_message})
       _append_turn(session_id, "assistant", fallback_search_result)
@@ -1727,18 +2076,8 @@ def _build_chat_payload(
 
   if _looks_like_fact_question(effective_message) and not prefer_local_llm:
     local_started = time.perf_counter()
-    search_payload = _tool_call('search', search_google_web_structured, recompute_message)
+    search_payload, fallback_search_result = _run_search_with_fallback(recompute_message)
     local_time_sec += time.perf_counter() - local_started
-    fallback_search_result = run_stage('tool', search_google_web, recompute_message, tool_name='search_fallback') if not search_payload.get('ok') or search_payload.get('search_engine') == 'Demo' else ''
-    if search_payload.get("ok") and str(search_payload.get("search_engine") or "") == "Demo" and fallback_search_result and fallback_search_result not in {
-      "Google検索結果を取得できませんでした。",
-      "入力された文章を日本語へ翻訳できませんでした。日本語で入力し直すか、翻訳を再試行してください。",
-    }:
-      search_payload = {
-        **search_payload,
-        "summary_ja": fallback_search_result,
-        "search_engine": "Google",
-      }
     if search_payload.get("ok"):
       route_label = "local_search"
       response_text = _format_structured_search_response(search_payload)
@@ -1746,10 +2085,7 @@ def _build_chat_payload(
       print(f"route={route_label}")
       return finalize(ok=True, route=route_label, response=response_text, extra={"ui": _build_search_success_ui()})
 
-    if fallback_search_result and fallback_search_result not in {
-      "Google検索結果を取得できませんでした。",
-      "入力された文章を日本語へ翻訳できませんでした。日本語で入力し直すか、翻訳を再試行してください。",
-    }:
+    if fallback_search_result and fallback_search_result not in _SEARCH_FALLBACK_BLOCKLIST:
       route_label = "local_search"
       add_card("search", {"text": fallback_search_result, "query": recompute_message})
       _append_turn(session_id, "assistant", fallback_search_result)
@@ -1763,11 +2099,15 @@ def _build_chat_payload(
     return finalize(ok=True, route="search_failed", response=search_failure, extra={"ui": _build_search_failure_ui(), "error_type": error_type})
 
   history_for_prompt = [] if clarification_followup else history
+  if turbo_mode and len(history_for_prompt) > 4:
+    history_for_prompt = history_for_prompt[-4:]
   prompt = build_local_prompt(
     llm_message,
     conversation_history=history_for_prompt,
     user_profile_context=profile_context,
   )
+
+  prompt = style_prompt(prompt, reply_style)
 
   if experiment_mode == "FIXED_ROUTING":
     cloud_started = time.perf_counter()
@@ -1789,7 +2129,7 @@ def _build_chat_payload(
       return finalize(ok=False, route="error", error=f"（FIXED_ROUTINGのクラウド呼び出し失敗: {error}）")
 
   local_started = time.perf_counter()
-  result = _generate_llm_response(prompt)
+  result = _generate_llm_response(prompt, retry_count_override=1 if turbo_mode else None)
   local_time_sec += time.perf_counter() - local_started
 
   if result.get("ok"):
@@ -1831,10 +2171,20 @@ def _build_chat_payload(
   # DYNAMIC_ROUTING: do not call cloud immediately.
   # First show Google evidence and ask user whether cloud API usage is allowed.
   local_started = time.perf_counter()
-  search_payload = _tool_call('search', search_google_web_structured, message)
+  search_payload, fallback_search_result = _run_search_with_fallback(message)
   local_time_sec += time.perf_counter() - local_started
-  fallback_search_result = run_stage('tool', search_google_web, message, tool_name='search_fallback') if not search_payload.get('ok') else ''
-  if search_payload.get("ok") or (fallback_search_result and fallback_search_result not in {"Google検索結果を取得できませんでした。", "入力された文章を日本語へ翻訳できませんでした。日本語で入力し直すか、翻訳を再試行してください。"}):
+  if turbo_mode:
+    if search_payload.get("ok"):
+      response_text = _format_structured_search_response(search_payload)
+      _append_turn(session_id, "assistant", response_text)
+      return finalize(ok=True, route="local_search", response=response_text, fallback_used=True, extra={"cache": {"turbo": True}})
+    if fallback_search_result and fallback_search_result not in _SEARCH_FALLBACK_BLOCKLIST:
+      _append_turn(session_id, "assistant", fallback_search_result)
+      return finalize(ok=True, route="local_search", response=fallback_search_result, fallback_used=True, extra={"cache": {"turbo": True}})
+    response_text = "Turboモードではクラウドフォールバックを使わず、ローカル検索結果を優先します。検索結果を取得できませんでした。"
+    _append_turn(session_id, "assistant", response_text)
+    return finalize(ok=True, route="search_failed", response=response_text, fallback_used=True, extra={"error_type": search_payload.get("error_type") or "search_fetch_failed", "cache": {"turbo": True}})
+  if search_payload.get("ok") or (fallback_search_result and fallback_search_result not in _SEARCH_FALLBACK_BLOCKLIST):
     approval_token = uuid4().hex
     reject_token = uuid4().hex
     _set_pending_api_approval(
@@ -1842,6 +2192,7 @@ def _build_chat_payload(
       {
         "session_id": session_id,
         "prompt": prompt,
+        "reply_style": reply_style,
         "message": message,
       },
     )
@@ -1850,6 +2201,7 @@ def _build_chat_payload(
       {
         "session_id": session_id,
         "prompt": prompt,
+        "reply_style": reply_style,
         "message": message,
       },
     )
@@ -1902,7 +2254,15 @@ def _stream_chat_payload(
   current_location: str = "",
   experiment_mode: str | None = None,
   test_case_id: str = "",
+  turbo_mode: bool = False,
+  reply_style: str = "standard",
 ):
+  reply_style = normalize_style(reply_style)
+  if reply_style != 'standard':
+    yield from _chat_activity_events(message, session_id, current_location=current_location,
+                                    experiment_mode=experiment_mode, test_case_id=test_case_id,
+                                    turbo_mode=turbo_mode, reply_style=reply_style)
+    return
   message = (message or "").strip()
   current_location = (current_location or "").strip()
   if not message:
@@ -1942,6 +2302,7 @@ def _stream_chat_payload(
       current_location=current_location,
       experiment_mode=resolved_mode,
       test_case_id=test_case_id,
+      turbo_mode=turbo_mode,
     )
     if payload.get("ok"):
       yield {"event": "done", "data": payload}
@@ -1960,6 +2321,7 @@ def _stream_chat_payload(
       current_location=current_location,
       experiment_mode=resolved_mode,
       test_case_id=test_case_id,
+      turbo_mode=turbo_mode,
     )
     if payload.get("ok"):
       yield {"event": "done", "data": payload}
@@ -2157,7 +2519,7 @@ def _stream_chat_payload(
 
 
   # ブラウザに返すローカルUI全体のHTML
-HTML_PAGE = """<!doctype html>
+HTML_PAGE = r"""<!doctype html>
 <html lang="ja">
 <head>
   <meta charset="utf-8" />
@@ -3233,13 +3595,49 @@ HTML_PAGE = """<!doctype html>
     }
 
     @media (max-width: 860px) {
+      .dashboard-header {
+        position: sticky;
+        top: 0;
+        z-index: 30;
+        padding: 8px 10px;
+        border-radius: 18px;
+        backdrop-filter: blur(14px);
+      }
+      .dashboard-nav {
+        display: flex;
+        overflow-x: auto;
+        gap: 8px;
+        padding-bottom: 2px;
+        -ms-overflow-style: none;
+        scrollbar-width: none;
+      }
+      .dashboard-nav::-webkit-scrollbar { display: none; }
+      .dashboard-nav button {
+        flex: 0 0 auto;
+        min-height: 42px;
+        padding: 10px 12px;
+        border-radius: 14px;
+        font-size: 12px;
+      }
       .first-screen { grid-template-columns: 1fr; min-height: auto; }
       .lower-section { grid-template-columns: 1fr; }
       .hud-right { grid-template-rows: auto auto auto; }
       #chat-log { min-height: 48vh; max-height: none; }
       .bubble { max-width: 100%; }
-      .composer { bottom: 0; }
-      .row > * { flex: 1 1 100%; }
+      .composer {
+        bottom: 0;
+        padding: 10px 10px 0;
+        border-radius: 18px;
+        background: rgba(15, 23, 42, 0.88);
+        box-shadow: 0 -8px 18px rgba(2, 6, 23, 0.24);
+      }
+      .row {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 8px;
+      }
+      .row > * { width: 100%; }
+      .row > .turbo-toggle { grid-column: 1 / -1; }
       button { width: 100%; }
       .geo-controls { grid-template-columns: auto 1fr auto; }
       .geo-action-btn { width: 36px; }
@@ -3254,7 +3652,7 @@ HTML_PAGE = """<!doctype html>
 <body>
   <div class="shell jarvis-shell">
     <header class="dashboard-header">
-      <div class="dashboard-brand">AI<span> / </span>CORE <small>LOCAL FIRST ASSISTANT</small></div>
+      <div class="dashboard-brand">AI<small>LOCAL / SYSTEM INTERFACE</small></div>
       <nav class="dashboard-nav" aria-label="情報パネル">
         <button type="button" data-open-panel="weather" aria-expanded="false">天気</button>
         <button type="button" data-open-panel="map" aria-expanded="false">地図</button>
@@ -3370,16 +3768,11 @@ HTML_PAGE = """<!doctype html>
         <div class="panel-body chat-body">
           <div id="chat-log"></div>
           <div class="composer">
-            <div class="quick-grid">
-              <button class="secondary quick-prompt" type="button" data-text="このローカルサーバーでできることを具体例つきで教えて">できること</button>
-              <button class="secondary quick-prompt" type="button" data-text="ここから東京駅までの行き方を教えて">ルート</button>
-              <button class="secondary quick-prompt" type="button" data-text="(150+230)÷19 を計算して">計算</button>
-              <button class="secondary quick-prompt" type="button" data-text="保存してある自己PR文書を一覧で見せて">文書一覧</button>
-            </div>
             <label class="composer-label" for="message">メッセージ</label><textarea id="message" aria-label="メッセージ" placeholder="メッセージを入力…（Shift + Enterで改行）"></textarea>
             <div class="row">
               <input id="session-id" placeholder="session id" />
               <input id="current-location" placeholder="現在地（任意）" />
+              <label class="turbo-toggle" title="低遅延優先。クラウドフォールバックを抑制します。"><input id="turbo-mode" type="checkbox" /> Turbo</label>
               <button id="send-btn" type="button">送信</button>
               <button id="reset-btn" class="secondary" type="button">新しい会話</button>
             </div>
@@ -3481,11 +3874,22 @@ HTML_PAGE = """<!doctype html>
   <script src="/site/maps/topojson-client.min.js"></script>
   <script src="/site/dashboard/dashboard.js"></script>
   <script src="/site/dashboard/workbench.js"></script>
+  <script src="/site/dashboard/desktop.js"></script>
+  <script src="/site/dashboard/maximalist.js"></script>
+  <script src="/site/dashboard/operations.js"></script>
+  <script src="/site/dashboard/sensory.js"></script>
+  <script src="/site/dashboard/task_state.js"></script>
+  <script src="/site/dashboard/taskdeck.js"></script>
+  <script src="/site/dashboard/mission.js"></script>
+  <script src="/site/dashboard/apple.js"></script>
+  <script src="/site/dashboard/wake_voice.js"></script>
+  <script src="/site/dashboard/spatial.js"></script>
   <script>
     const chatLog = document.getElementById('chat-log');
     const messageInput = document.getElementById('message');
     const sessionInput = document.getElementById('session-id');
     const locationInput = document.getElementById('current-location');
+    const turboModeInput = document.getElementById('turbo-mode');
     const sendBtn = document.getElementById('send-btn');
     const resetBtn = document.getElementById('reset-btn');
     const healthText = document.getElementById('health-text');
@@ -3555,6 +3959,7 @@ HTML_PAGE = """<!doctype html>
 
     const storageKey = 'local-ai-session-id';
     const locationStorageKey = 'local-ai-current-location';
+    const turboModeStorageKey = 'local-ai-turbo-mode-v1';
     const geoPanelCacheKey = 'local-ai-geo-panel-cache-v1';
     const geoPanelModeKey = 'local-ai-geo-mode-v1';
     const geoManualRegionKey = 'local-ai-geo-manual-region-v1';
@@ -3603,29 +4008,8 @@ HTML_PAGE = """<!doctype html>
       });
     }
 
-    function formatTokyoNow() {
-      const now = new Date();
-      const time = new Intl.DateTimeFormat('ja-JP', {
-        timeZone: 'Asia/Tokyo',
-        hour: '2-digit',
-        minute: '2-digit',
-        second: '2-digit',
-        hour12: false,
-      }).format(now);
-      const date = new Intl.DateTimeFormat('ja-JP', {
-        timeZone: 'Asia/Tokyo',
-        year: 'numeric',
-        month: '2-digit',
-        day: '2-digit',
-        weekday: 'short',
-      }).format(now);
-      return { time, date };
-    }
-
     function refreshTokyoClock() {
-      const current = formatTokyoNow();
-      clockTime.textContent = current.time;
-      clockDate.textContent = current.date;
+      window.desktopIntegration?.renderClock();
     }
 
     function makeSessionId() {
@@ -3676,6 +4060,10 @@ HTML_PAGE = """<!doctype html>
     sessionInput.value = savedSessionId;
     const savedCurrentLocation = safeStorageGet(locationStorageKey) || '';
     locationInput.value = savedCurrentLocation;
+    const savedTurboMode = safeStorageGet(turboModeStorageKey) === 'true';
+    if (turboModeInput) {
+      turboModeInput.checked = savedTurboMode;
+    }
     const savedGeoMode = safeStorageGet(geoPanelModeKey) || 'ip';
     const savedManualRegion = safeStorageGet(geoManualRegionKey) || '';
     geoState.mode = ['device', 'ip', 'manual'].includes(savedGeoMode) ? savedGeoMode : 'ip';
@@ -3689,6 +4077,10 @@ HTML_PAGE = """<!doctype html>
 
     function persistCurrentLocation(value) {
       safeStorageSet(locationStorageKey, value || '');
+    }
+
+    function persistTurboMode(enabled) {
+      safeStorageSet(turboModeStorageKey, enabled ? 'true' : 'false');
     }
 
     function persistGeoMode(mode) {
@@ -4701,6 +5093,7 @@ HTML_PAGE = """<!doctype html>
       }
 
       const body = document.createElement('div');
+      body.className = 'bubble-content';
       body.innerHTML = linkifyText(rawText).split(String.fromCharCode(10)).join('<br>');
       el.appendChild(body);
       chatLog.appendChild(el);
@@ -4899,6 +5292,52 @@ HTML_PAGE = """<!doctype html>
       });
       row.appendChild(btn);
       wrap.appendChild(row);
+
+      chatLog.appendChild(wrap);
+      chatLog.scrollTop = chatLog.scrollHeight;
+    }
+
+    function addFollowupPanel(followups) {
+      if (!Array.isArray(followups) || followups.length === 0) {
+        return;
+      }
+
+      const wrap = document.createElement('div');
+      wrap.className = 'followup-wrap';
+
+      const title = document.createElement('div');
+      title.className = 'choice-title';
+      title.textContent = '次にできること';
+      wrap.appendChild(title);
+
+      const chips = document.createElement('div');
+      chips.className = 'followup-chips';
+      wrap.appendChild(chips);
+
+      followups.slice(0, 4).forEach((item) => {
+        const text = String(getPathValue(item, ['message'], '') || '').trim();
+        if (!text) {
+          return;
+        }
+        const chip = document.createElement('button');
+        chip.type = 'button';
+        chip.className = 'followup-chip';
+        chip.textContent = String(getPathValue(item, ['label'], '') || text);
+        const description = String(getPathValue(item, ['description'], '') || '').trim();
+        if (description) {
+          chip.title = description;
+        }
+        chip.addEventListener('click', () => {
+          messageInput.value = text;
+          messageInput.focus();
+          sendMessage();
+        });
+        chips.appendChild(chip);
+      });
+
+      if (!chips.children.length) {
+        return;
+      }
 
       chatLog.appendChild(wrap);
       chatLog.scrollTop = chatLog.scrollHeight;
@@ -5201,6 +5640,7 @@ HTML_PAGE = """<!doctype html>
           throw new Error('storage unavailable');
         }
 
+        window.dispatchEvent(new CustomEvent('jarvis:storage-status',{detail:data}));
         const dbPath = getPathValue(data, ['paths', 'documents_db'], 'unknown');
         const dbRows = getPathValue(data, ['counts', 'documents_db_rows'], 0);
         const docItems = getPathValue(data, ['counts', 'document_items'], 0);
@@ -5253,7 +5693,8 @@ HTML_PAGE = """<!doctype html>
 
       isSending = true;
       sendBtn.disabled = true;
-      runtimeProcessing.textContent = '処理中';
+      const turboMode = !!(turboModeInput && turboModeInput.checked);
+      runtimeProcessing.textContent = turboMode ? '処理中 (Turbo)' : '処理中';
       window.aiCore.setState('thinking');
       addBubble('user', text);
       messageInput.value = '';
@@ -5261,15 +5702,16 @@ HTML_PAGE = """<!doctype html>
       const typing = addBubble('system', 'thinking...');
 
       try {
-        const data = await window.dashboardRequest({ message: text, session_id: sessionId, current_location: currentLocation });
+        const data = await window.dashboardRequest({ message: text, session_id: sessionId, current_location: currentLocation, turbo_mode: turboMode });
         typing.remove();
         if (data.ok) {
           addBubble('assistant', data.response);
+          addFollowupPanel(data.followups);
           window.workbench.complete(data);
           if (window.workbench.succeeded(data)) window.aiCore.answer(data.response, data.evaluation);
           else window.aiCore.setState('error');
           showEvaluation(data.evaluation);
-          appendRuntimeLog(`message ok: ${text.slice(0, 36)}`);
+          appendRuntimeLog(`message ok (${data.performance_mode || (turboMode ? 'turbo' : 'balanced')}): ${text.slice(0, 36)}`);
           if (data.ui) {
             if (data.ui.type === 'prompt_input') {
               addPromptInputPanel(data.ui);
@@ -5283,7 +5725,7 @@ HTML_PAGE = """<!doctype html>
           window.aiCore.setState('error');
           window.workbench.complete(data);
           showEvaluation(data.evaluation);
-          appendRuntimeLog(`message error: ${String(data.error || 'error').slice(0, 36)}`);
+          appendRuntimeLog(`message error (${data.performance_mode || (turboMode ? 'turbo' : 'balanced')}): ${String(data.error || 'error').slice(0, 36)}`);
         }
       } catch (e) {
         typing.remove();
@@ -5413,6 +5855,12 @@ HTML_PAGE = """<!doctype html>
     locationInput.addEventListener('change', () => {
       persistCurrentLocation(locationInput.value.trim());
     });
+    if (turboModeInput) {
+      turboModeInput.addEventListener('change', () => {
+        persistTurboMode(!!turboModeInput.checked);
+        appendRuntimeLog(`performance mode: ${turboModeInput.checked ? 'turbo' : 'balanced'}`);
+      });
+    }
 
     setupGeoVisibilityWatcher();
     initializeGeoMaps();
@@ -5438,13 +5886,25 @@ HTML_PAGE = """<!doctype html>
       refreshGeoPanel(false, 'ip');
     }
     refreshDocuments();
-    setInterval(refreshHealth, 10000);
+    setInterval(() => {
+      refreshHealth();
+      refreshStorage();
+    }, 20000);
     setInterval(refreshMeta, 60000);
-    setInterval(refreshStorage, 30000);
-    setInterval(() => refreshGeoPanel(true, geoState.mode), 30 * 60 * 1000);
-    setInterval(() => refreshDocuments(), 30000);
+    setInterval(() => refreshGeoPanel(true, geoState.mode), 45 * 60 * 1000);
+    setInterval(() => refreshDocuments(), 60000);
+    window.prepareMissionPanels();
+    window.prepareApplePanels();
+    window.prepareSensoryPanels();
     window.initDashboard();
     window.initWorkbench();
+    window.initDesktopIntegration();
+    window.initMaximalistDashboard();
+    window.initTaskDeck();
+    window.initJarvisOperations();
+    window.initMissionControl();
+    window.initAppleAgenda();
+    window.initSensoryUI();
     messageInput.focus({ preventScroll: true });
   </script>
 </body>
@@ -5529,10 +5989,146 @@ class LocalAIServerHandler(BaseHTTPRequestHandler):
   def _document_id_from_path(self, path: str) -> str:
     return path.removeprefix("/documents/").strip("/")
 
+  def _notification_guard(self, bridge=False, write=False) -> bool:
+    import ipaddress
+    try:
+      address = ipaddress.ip_address(self.client_address[0])
+      local = address.is_loopback or (getattr(address, 'ipv4_mapped', None) and address.ipv4_mapped.is_loopback)
+    except ValueError:
+      local = False
+    if not local:
+      self._send_json({'ok': False, 'error': '通知機能はバックエンドPC内のブラウザー専用です。'}, status=403)
+      self.close_connection = True
+      return False
+    if bridge:
+      if not notification_hub.authorized(self.headers.get('Authorization')):
+        self._send_json({'ok': False, 'error': 'unauthorized'}, status=401)
+        self.close_connection = True
+        return False
+    else:
+      origin = self.headers.get('Origin')
+      if origin:
+        try:
+          parsed = urlparse(origin)
+          origin_ok = parsed.scheme == 'http' and parsed.hostname in {'localhost','127.0.0.1','::1'} and (parsed.port or 80) == self.server.server_port
+        except ValueError:
+          origin_ok = False
+        if not origin_ok:
+          self._send_json({'ok': False, 'error': 'same-origin access required'}, status=403)
+          self.close_connection = True
+          return False
+      if write and self.headers.get('X-Jarvis-Notifications') != '1':
+        self._send_json({'ok': False, 'error': 'notification settings header required'}, status=403)
+        self.close_connection = True
+        return False
+    return True
+
+  def _mission_guard(self, write=False):
+    import ipaddress
+    try:
+      local=ipaddress.ip_address(self.client_address[0]).is_loopback
+    except ValueError:
+      local=False
+    origin=self.headers.get('Origin')
+    same=True
+    if origin:
+      try:
+        parsed=urlparse(origin)
+        same=parsed.scheme=='http' and parsed.hostname in {'localhost','127.0.0.1','::1'} and (parsed.port or 80)==self.server.server_port
+      except ValueError:
+        same=False
+    if not local or not same or (write and self.headers.get('X-Jarvis-Mission')!='1'):
+      self._send_json({'ok':False,'error':'この機能はバックエンドPC内の同じ画面から操作してください。'},status=403)
+      self.close_connection=True
+      return False
+    return True
+
+  def _mission_api(self, path, query=None, write=False):
+    if not self._mission_guard(write):return
+    try:
+      if write:
+        length=int(self.headers.get('Content-Length','0'))
+        if not 0 < length <= 3000000:
+          self._send_json({'ok':False,'error':'入力サイズが上限を超えました。'},status=413)
+          self.close_connection=True
+          return
+        data=json.loads(self.rfile.read(length).decode('utf-8'))
+        if not isinstance(data,dict):raise ValueError('JSONオブジェクトを指定してください。')
+        result=mission_control.dispatch(path.removeprefix('/mission/'),data)
+      else:
+        if path=='/mission/status':result=mission_control.systems()
+        elif path=='/mission/board':result=mission_control.board()
+        elif path=='/mission/knowledge':result=mission_control.knowledge_search((query.get('q') or [''])[0])
+        elif path=='/mission/calendar.ics':
+          body=mission_control.calendar_ics().encode('utf-8')
+          self.send_response(200);self.send_header('Content-Type','text/calendar; charset=utf-8')
+          self.send_header('Content-Disposition','attachment; filename="ai-agenda.ics"')
+          self.send_header('Content-Length',str(len(body)));self.send_header('Cache-Control','no-store');self.end_headers();self.wfile.write(body)
+          return
+        else:raise ValueError('対応していない機能です。')
+      self._send_json(result)
+    except (ValueError, TypeError, KeyError, ArithmeticError, SyntaxError) as error:
+      self._send_json({'ok':False,'error':str(error)[:300]},status=400)
+    except (OSError, RuntimeError):
+      self._send_json({'ok':False,'error':'接続または保存に失敗しました。サービス・権限・設定を確認してください。'},status=503)
+
+  def _apple_api(self, path, write=False):
+    if not self._mission_guard(write):return
+    try:
+      if write:
+        length=int(self.headers.get('Content-Length','0'))
+        if not 0<length<=3000000:
+          self._send_json({'ok':False,'error':'3MB以下のデータを指定してください。'},status=413);self.close_connection=True;return
+        data=json.loads(self.rfile.read(length).decode('utf-8'))
+        if not isinstance(data,dict):raise ValueError('JSONオブジェクトを指定してください。')
+        result=apple_sync.dispatch(path.removeprefix('/apple/'),data)
+      elif path=='/apple/view':result=apple_sync.view()
+      elif path=='/apple/export.ics':
+        body=apple_sync.export_ics().encode('utf-8');self.send_response(200);self.send_header('Content-Type','text/calendar; charset=utf-8');self.send_header('Content-Disposition','attachment; filename="apple-agenda.ics"');self.send_header('Content-Length',str(len(body)));self.send_header('Cache-Control','no-store');self.end_headers();self.wfile.write(body);return
+      elif path=='/apple/iphone-script.js':
+        self._send_file(os.path.join(os.path.dirname(__file__),'native','iPhoneAgenda','AI-Reminders-Sync.js'));return
+      else:raise ValueError('対応していないApple連携操作です。')
+      self._send_json(result)
+    except apple_sync.Conflict as error:self._send_json({'ok':False,'error':str(error)},status=409)
+    except (ValueError,TypeError,KeyError,ArithmeticError) as error:self._send_json({'ok':False,'error':str(error)[:300]},status=400)
+    except (OSError,RuntimeError):self._send_json({'ok':False,'error':'接続または保存に失敗しました。状態を再取得して確認してください。'},status=503)
+
   def do_GET(self) -> None:
     parsed = urlparse(self.path)
     path = parsed.path
     query = parse_qs(parsed.query or "")
+
+    if path.startswith("/apple/"):
+      self._apple_api(path)
+      return
+
+    if path.startswith("/mission/"):
+      self._mission_api(path,query)
+      return
+
+    if path == '/system/clock':
+      self._send_json(system_clock())
+      return
+
+    if path.startswith('/notifications/'):
+      if not self._notification_guard(bridge=path == '/notifications/bridge'):
+        return
+      if path in {'/notifications/settings','/notifications/bridge'}:
+        self._send_json(notification_hub.settings())
+      elif path == '/notifications/events':
+        try:
+          cursor = max(0, int((query.get('cursor') or ['0'])[0]))
+        except ValueError:
+          self._send_json({'ok': False, 'error': 'invalid cursor'}, status=400)
+          return
+        mode = str((query.get('mode') or ['CHAT'])[0]).upper()
+        if mode not in {'CHAT','SEARCH','INFO'}:
+          self._send_json({'ok':False,'error':'invalid mode'}, status=400)
+          return
+        self._send_json(notification_hub.events(cursor, mode))
+      else:
+        self._send_json({'ok':False,'error':'not found'}, status=404)
+      return
 
     if path == "/" or path == "/index.html":
       self._send_html(HTML_PAGE)
@@ -5548,7 +6144,7 @@ class LocalAIServerHandler(BaseHTTPRequestHandler):
       self._send_file(file_path)
       return
 
-    if path in {"/site/dashboard/dashboard.css", "/site/dashboard/dashboard.js", "/site/dashboard/workbench.js"}:
+    if path in {"/site/dashboard/dashboard.css", "/site/dashboard/dashboard.js", "/site/dashboard/workbench.js", "/site/dashboard/desktop.js", "/site/dashboard/maximalist.js", "/site/dashboard/operations.js", "/site/dashboard/sensory.js", "/site/dashboard/task_state.js", "/site/dashboard/taskdeck.js", "/site/dashboard/mission.js", "/site/dashboard/wake_voice.js", "/site/dashboard/spatial.js", "/site/dashboard/apple.js"}:
       self._send_file(os.path.join(os.path.dirname(__file__), "site", "dashboard", path.rsplit("/", 1)[-1]))
       return
 
@@ -5680,7 +6276,38 @@ class LocalAIServerHandler(BaseHTTPRequestHandler):
   def do_POST(self) -> None:
     path = urlparse(self.path).path
 
-    if path not in {"/chat", "/chat/stream", "/sessions/clear", "/documents", "/evaluation/feedback", "/processing/client"}:
+    if path.startswith("/apple/"):
+      self._apple_api(path,write=True)
+      return
+
+    if path.startswith("/mission/"):
+      self._mission_api(path,write=True)
+      return
+
+    if path.startswith('/notifications/'):
+      if not self._notification_guard(bridge=path == '/notifications/bridge', write=True):
+        return
+      try:
+        length = int(self.headers.get('Content-Length','0'))
+        if length > 262144:
+          self._send_json({'ok':False,'error':'request too large'}, status=413)
+          self.close_connection = True
+          return
+        data = self._read_json()
+        if path == '/notifications/settings':
+          self._send_json(notification_hub.configure(data))
+        elif path == '/notifications/bridge':
+          self._send_json(notification_hub.ingest(data))
+        elif path == '/notifications/connect':
+          result = notification_hub.connect(self.server.server_port)
+          self._send_json(result, status=200 if result.get('ok') else 409)
+        else:
+          self._send_json({'ok':False,'error':'not found'}, status=404)
+      except (ValueError, OSError, TypeError):
+        self._send_json({'ok':False,'error':'通知設定を処理できませんでした。入力と補助アプリの登録を確認してください。'}, status=400)
+      return
+
+    if path not in {"/chat", "/chat/assist", "/chat/stream", "/sessions/clear", "/documents", "/evaluation/feedback", "/processing/client"}:
       self._send_json({"ok": False, "error": "not found"}, status=404)
       return
 
@@ -5689,6 +6316,7 @@ class LocalAIServerHandler(BaseHTTPRequestHandler):
     experiment_mode = str(data.get("experiment_mode", "")).strip() or None
     test_case_id = str(data.get("test_case_id", "")).strip()
     tool_request = data.get("tool_request") if isinstance(data.get("tool_request"), dict) else None
+    turbo_mode = bool(data.get("turbo_mode", False))
 
     if path == '/processing/client':
       timings = data.get('timings')
@@ -5735,6 +6363,16 @@ class LocalAIServerHandler(BaseHTTPRequestHandler):
     session_id = str(data.get("session_id") or uuid4().hex)
     current_location = str(data.get("current_location") or "").strip()
 
+    try:
+      reply_style = normalize_style(data.get('reply_style'))
+    except ValueError as error:
+      self._send_json({'ok': False, 'error': str(error)}, status=400)
+      return
+
+    if path == "/chat/assist":
+      self._send_json(_build_chat_assist_payload(message, session_id, current_location=current_location))
+      return
+
     if path == "/chat/stream":
       self._send_sse_headers()
       for event in _stream_chat_payload(
@@ -5743,6 +6381,8 @@ class LocalAIServerHandler(BaseHTTPRequestHandler):
         current_location=current_location,
         experiment_mode=experiment_mode,
         test_case_id=test_case_id,
+        turbo_mode=turbo_mode,
+        reply_style=reply_style,
       ):
         self._send_sse_event(event["event"], event["data"])
       return
@@ -5751,7 +6391,7 @@ class LocalAIServerHandler(BaseHTTPRequestHandler):
       self._send_sse_headers()
       try:
         for event in _chat_activity_events(message, session_id, current_location=current_location,
-                                         experiment_mode=experiment_mode, test_case_id=test_case_id, tool_request=tool_request):
+                                         experiment_mode=experiment_mode, test_case_id=test_case_id, tool_request=tool_request, turbo_mode=turbo_mode, reply_style=reply_style):
           self._send_sse_event(event["event"], event["data"])
       except (BrokenPipeError, ConnectionResetError):
         pass
@@ -5764,6 +6404,8 @@ class LocalAIServerHandler(BaseHTTPRequestHandler):
       experiment_mode=experiment_mode,
       test_case_id=test_case_id,
       tool_request=tool_request,
+      turbo_mode=turbo_mode,
+      reply_style=reply_style,
     )
     self._send_json(response, status=200 if response.get("ok") else 400)
 

@@ -30,3 +30,10 @@ data/documents_db.txt
 Thumbs.db
 .vscode/
 data/processing_log.jsonl
+
+# Native notification bridge build and per-run local connection secret
+native/NotificationBridge/bin/
+native/NotificationBridge/obj/
+native/NotificationBridge/publish/
+native/NotificationBridge/bridge-registration.json
+native/NotificationBridge/AppxManifest.xml

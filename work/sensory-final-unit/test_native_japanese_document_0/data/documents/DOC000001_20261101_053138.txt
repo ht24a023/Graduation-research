@@ -1,0 +1,9 @@
+# Document ID: DOC000001
+# Title: 確認文書
+# Created At: 2026-11-01T05:31:38
+# Updated At: 2026-11-01T05:31:38
+# Status: active
+# Checksum: 7f5796bccafea315ae12537a27d858e46e9b5603
+
+----- BODY -----
+実際の本文

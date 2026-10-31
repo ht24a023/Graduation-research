@@ -1,0 +1,3 @@
+# documents_db (tab-separated)
+# doc_id	created_at	updated_at	status	title	file_path	chars	checksum
+DOC000001	2026-11-01T05:31:38	2026-11-01T05:31:38	active	確認文書	data/documents/DOC000001_20261101_053138.txt	5	7f5796bccafea315ae12537a27d858e46e9b5603

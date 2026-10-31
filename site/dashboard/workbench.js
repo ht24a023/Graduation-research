@@ -5,6 +5,7 @@
   const titles = { weather:'天気', map:'地図', location:'現在地', translate:'翻訳', document:'文書', system:'システム', search:'検索', youtube:'YouTube', history:'処理履歴', performance:'性能', qr:'QRコード' };
   const stageNames = { intent:'意図判定', tool:'ツール実行', local_llm:'ローカルAI推論', cloud_llm:'クラウドAI推論' };
   let active = null, clock = null, recognitionStart = null, recognitionResult = null;
+  let historyVersion = 0;
   const knownCards = new Set(), records = new Map(), suppressed = new Set();
   function successful(data) { const latest = new Map((data.cards || []).map(card => [card.kind,card])); return !!data.ok && data.route !== 'search_failed' && [...latest.values()].every(card => card.success); }
   function node(tag, text, className) { const el = document.createElement(tag); if (text != null) el.textContent = text; if (className) el.className = className; return el; }
@@ -35,7 +36,7 @@
     dock.append(
       panel('youtube','<div class="tool-form"><label>動画の検索語<input id="youtube-query" placeholder="検索する動画" /></label><button type="button" data-run="youtube">YouTube検索</button></div><div id="youtube-result" class="tool-result">取得した動画を表示します。</div>'),
       panel('qr','<div class="tool-form"><label>URL・文字列<textarea id="qr-text" rows="3" maxlength="2000"></textarea></label><button type="button" data-run="qr">QRコードを生成</button></div><div id="qr-result" class="tool-result">PC内で生成します。</div>'),
-      panel('history','<button type="button" id="reload-processing">履歴を更新</button><div id="processing-history" class="tool-result">この会話の処理履歴を読み込みます。</div>'),
+      panel('history','<div class="tool-form"><label>処理履歴を絞り込み<input id="history-query" placeholder="要求・ツール名・処理経路" /></label><label>結果<select id="history-status"><option value="all">すべて</option><option value="success">成功</option><option value="failure">失敗</option></select></label><div class="language-row"><button type="button" id="reload-processing">履歴を更新</button><button type="button" id="export-processing-json">履歴JSONを保存</button></div><span id="history-count" role="status"></span></div><div id="processing-history" class="tool-result">この会話の処理履歴を読み込みます。</div>'),
       panel('performance','<div id="performance-result"></div><div id="performance-chart" aria-label="実測した総応答時間の推移"></div><p class="measurement-note">グラフはこの会話の実測値。初回テキスト表示と音声出力完了はブラウザー時計、各内部処理はサーバー時計で測定します。</p>')
     );
     const runtime=document.querySelector('.runtime-panel'); document.querySelector('[data-info-panel="performance"] .panel-body').append(runtime);
@@ -45,7 +46,7 @@
     const mapForm=node('div',null,'tool-form'); mapForm.innerHTML='<label>出発地・目的地<input id="map-query" placeholder="大阪駅から京都駅まで電車で" /></label><button type="button" data-run="map">経路を検索</button><div id="map-result" class="tool-result"></div>';
     $('map-panel-content').prepend(mapForm);
     // 起動時に見えるのはAIコアと短い計測情報だけ。
-    const live=node('section',null,'panel live-timings'); live.innerHTML='<div class="panel-header"><strong>PROCESS / 実測</strong><span id="live-stage">待機中</span></div><div class="panel-body"><div id="live-elapsed">0.000 <small>秒</small></div><div id="live-stage-times"></div><p class="measurement-note">送信からの経過時間。詳しい記録は「性能」「処理履歴」へ。</p></div>';
+    const live=node('section',null,'panel live-timings'); live.innerHTML='<div class="panel-header"><strong>PROCESS / 実測</strong><span id="live-stage">待機中</span></div><div class="panel-body"><div id="live-elapsed">0.000 <small>秒</small></div><div id="live-stage-times"></div><div id="live-stage-trail" aria-live="polite"></div><p class="measurement-note">送信からの経過時間。詳しい記録は「性能」「処理履歴」へ。</p></div>';
     document.querySelector('.ai-core-panel').after(live);
     const nav=document.querySelector('.dashboard-nav');
     for (const kind of ['document','system','youtube','history','performance','qr']) {
@@ -66,7 +67,8 @@
     if (card.event_id && knownCards.has(card.event_id)) return;
     if (card.event_id) knownCards.add(card.event_id);
     const kind=card.kind, data=card.data || {};
-    if (kind==='weather') { $('weather-summary').dataset.toolResult='true'; rawResult($('weather-summary'),data,card.success); }
+    if (kind==='mission'||kind==='knowledge') window.missionControl?.card(kind,data);
+    else if (kind==='weather') { $('weather-summary').dataset.toolResult='true'; rawResult($('weather-summary'),data,card.success); }
     else if (kind==='map') rawResult($('map-result'),data,card.success);
     else if (kind==='translate') {
       const box=$('translate-result'); box.replaceChildren();
@@ -117,6 +119,22 @@
     const totals=execution?.stage_totals || {};
     for (const kind of ['intent','tool','local_llm','cloud_llm']) line(box,stageNames[kind],kind in totals ? seconds(totals[kind]) : '未実行');
   }
+  function pushStageTrail(label,status='info') {
+    if (!active) return;
+    active.stageTrail = active.stageTrail || [];
+    const elapsed = (performance.now() - active.start) / 1000;
+    active.stageTrail.push({ label: String(label || 'stage'), status, elapsed });
+    if (active.stageTrail.length > 10) active.stageTrail.shift();
+    const box = $('live-stage-trail');
+    if (!box) return;
+    box.replaceChildren();
+    active.stageTrail.forEach(item => {
+      const row = node('div', null, 'stage-trail-row');
+      row.dataset.status = item.status;
+      row.append(node('span', item.label), node('strong', `${item.elapsed.toFixed(2)}s`));
+      box.append(row);
+    });
+  }
   function logTimings(record) {
     if (!record?.request_id) return;
     fetch('/processing/client',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({request_id:record.request_id,session_id:record.session_id,timings:record.client_timings || {}})}).catch(()=>{});
@@ -140,10 +158,17 @@
     showRecord(record,details.querySelector('.execution-body'));
   }
   function renderHistory() {
-    const rows=[...records.values()].sort((a,b)=>(a.created_at||0)-(b.created_at||0)).slice(-60);
+    const session=$('session-id').value;
+    const rows=[...records.values()].filter(row=>row.session_id===session).sort((a,b)=>(a.created_at||0)-(b.created_at||0)).slice(-60);
+    window.dispatchEvent(new CustomEvent('jarvis:processing-history',{detail:{session_id:session,records:rows}}));
     const box=$('processing-history'); box.replaceChildren();
     if (!rows.length) box.append(node('p','この会話の記録はまだありません。'));
-    rows.slice().reverse().forEach(record=>{
+    const query=($('history-query')?.value||'').trim().toLocaleLowerCase();
+    const status=$('history-status')?.value||'all';
+    const matching=rows.filter(row=>(status==='all'||(status==='success'?row.success:!row.success)) && (!query||[row.message,row.route,...(row.execution?.stages||[]).map(stage=>stage.tool_name||stageNames[stage.stage]||stage.stage)].join(' ').toLocaleLowerCase().includes(query)));
+    $('history-count').textContent=`${matching.length} / ${rows.length}件`;
+    if(rows.length && !matching.length)box.append(node('p','条件に一致する記録はありません。'));
+    matching.slice().reverse().forEach(record=>{
       const item=node('details',null,'processing-item');
       item.append(node('summary',`${record.success?'完了':'失敗'} · ${String(record.message||'').slice(0,60)}`));
       const stages=node('div');
@@ -153,23 +178,32 @@
     const performanceBox=$('performance-result'); performanceBox.replaceChildren();
     if (!rows.length) { performanceBox.append(node('p','処理を実行すると実測結果を表示します。')); return; }
     showRecord(rows[rows.length-1],performanceBox);
+    const measured=rows.map(row=>row.execution?.server_elapsed_sec).filter(value=>typeof value==='number' && Number.isFinite(value) && value>=0).sort((a,b)=>a-b);
+    line(performanceBox,'記録数 / 成功率',`${rows.length}件 / ${(rows.filter(row=>row.success).length/rows.length*100).toFixed(1)}%`);
+    if(measured.length) {
+      const middle=Math.floor(measured.length/2);
+      line(performanceBox,'サーバー処理 平均',seconds(measured.reduce((sum,value)=>sum+value,0)/measured.length));
+      line(performanceBox,'サーバー処理 中央値',seconds(measured.length%2?measured[middle]:(measured[middle-1]+measured[middle])/2));
+      line(performanceBox,'サーバー処理 P95',seconds(measured[Math.ceil(measured.length*.95)-1]));
+    }
     const sums=rows.reduce((acc,row)=>{ const t=row.execution?.stage_totals||{}; acc.local+=t.local_llm||0; acc.cloud+=t.cloud_llm||0; return acc; },{local:0,cloud:0});
     const total=sums.local+sums.cloud;
     line(performanceBox,'推論時間比率（この会話）',total>0?`ローカル ${(sums.local/total*100).toFixed(1)}% / クラウド ${(sums.cloud/total*100).toFixed(1)}%`:'AI推論の実行なし');
     const chart=$('performance-chart'); chart.replaceChildren();
     const download=node('a','この会話の計測CSVを保存','result-link'); download.href='/processing/export.csv?session_id='+encodeURIComponent($('session-id').value); download.download='processing_timings.csv'; chart.append(download);
-    const values=rows.map(row=>row.client_timings?.text_display_complete_sec ?? row.execution?.server_elapsed_sec).filter(value=>typeof value==='number');
+    const values=rows.map(row=>row.execution?.server_elapsed_sec).filter(value=>typeof value==='number' && Number.isFinite(value) && value>=0);
     if (!values.length) return;
-    const ns='http://www.w3.org/2000/svg', svg=document.createElementNS(ns,'svg'); svg.setAttribute('viewBox','0 0 300 110'); svg.setAttribute('role','img'); svg.setAttribute('aria-label','応答時間の推移、単位は秒');
+    const ns='http://www.w3.org/2000/svg', svg=document.createElementNS(ns,'svg'); svg.setAttribute('viewBox','0 0 300 110'); svg.setAttribute('role','img'); svg.setAttribute('aria-label','サーバー処理時間の推移、単位は秒');
     const max=Math.max(...values,.001); const points=values.map((value,index)=>`${12+index/Math.max(1,values.length-1)*276},${95-value/max*75}`).join(' ');
     const polyline=document.createElementNS(ns,'polyline'); polyline.setAttribute('points',points); polyline.setAttribute('fill','none'); polyline.setAttribute('stroke','#64dced'); polyline.setAttribute('stroke-width','2'); svg.append(polyline);
     values.forEach((value,index)=>{const c=document.createElementNS(ns,'circle'); c.setAttribute('cx',String(12+index/Math.max(1,values.length-1)*276)); c.setAttribute('cy',String(95-value/max*75)); c.setAttribute('r','3'); c.setAttribute('fill','#64dced'); const title=document.createElementNS(ns,'title'); title.textContent=seconds(value); c.append(title); svg.append(c);});
-    chart.append(node('p',`直近${values.length}件 · 最大${seconds(max)}`,'measurement-note'),svg);
+    chart.append(node('p',`サーバー処理 直近${values.length}件 · 最大${seconds(max)}`,'measurement-note'),svg);
   }
   async function loadHistory() {
     const session=$('session-id').value;
-    try { const response=await fetch('/processing/history?session_id='+encodeURIComponent(session)); const data=await response.json(); if ($('session-id').value !== session) return; (data.records||[]).forEach(record=>records.set(record.request_id,record)); renderHistory(); }
-    catch { $('processing-history').textContent='履歴を取得できませんでした。'; }
+    const version=++historyVersion;
+    try { const response=await fetch('/processing/history?session_id='+encodeURIComponent(session)); if(!response.ok)throw new Error('history'); const data=await response.json(); if ($('session-id').value !== session || version!==historyVersion) return; (data.records||[]).forEach(record=>{if(record.session_id===session)records.set(record.request_id,record);}); renderHistory(); }
+    catch { if(version===historyVersion && $('session-id').value===session)$('processing-history').textContent='履歴を取得できませんでした。再読み込みできます。'; }
   }
   async function runTool(kind,params={}) {
     const send=$('send-btn'); if (send.disabled) return;
@@ -183,7 +217,7 @@
       const data=await window.dashboardRequest({message,session_id:$('session-id').value,current_location:$('current-location').value,tool_request:request});
       window.addBubble('assistant',data.response || data.error || '処理が完了しました。');
       window.workbench.complete(data);
-      if (data.ok) window.aiCore.answer(data.response,data.evaluation); else window.aiCore.setState('error');
+      if (successful(data)) window.aiCore.answer(data.response,data.evaluation); else window.aiCore.setState('error');
       if (data.evaluation) window.showEvaluation(data.evaluation);
     } catch(error) { window.addBubble('assistant',`実行できませんでした: ${error.message}`); window.aiCore.setState('error'); window.workbench.fail(); }
     finally { send.disabled=false; }
@@ -194,24 +228,40 @@
     suppress(kind) { suppressed.add(kind); },
     currentId() { return active?.request_id; },
     begin(payload) {
+      window.dispatchEvent(new CustomEvent('jarvis:request-start'));
       suppressed.clear(); clearInterval(clock);
-      active={start:performance.now(),session_id:payload.session_id,message:payload.message,stageTotals:{},client_timings:{}};
+      active={start:performance.now(),session_id:payload.session_id,message:payload.message,stageTotals:{},client_timings:{},stageTrail:[]};
       if (recognitionResult?.text===payload.message) active.client_timings.speech_recognition_sec=recognitionResult.duration;
       recognitionResult=null;
-      $('live-stage').textContent='処理開始'; $('live-stage-times').replaceChildren(); drawLive(); clock=setInterval(drawLive,100);
+      $('live-stage').textContent='処理開始'; $('live-stage-times').replaceChildren(); drawLive(); clock=setInterval(drawLive,200);
+      pushStageTrail('処理開始','start');
     },
     event(kind,data) {
+      if(kind==='stage')window.dispatchEvent(new CustomEvent('jarvis:execution-event',{detail:{kind,data}}));
       if (kind==='card') applyCard(data);
+      if (kind==='status' && data?.state) {
+        const mapping = { analyzing:'意図判定', tool:'ツール実行', thinking:'ローカル推論', cloud:'クラウド推論', responding:'回答生成' };
+        pushStageTrail(mapping[data.state] || String(data.state), 'status');
+      }
       if (kind==='stage') {
         const name=data.tool_name || stageNames[data.stage] || data.stage;
         $('live-stage').textContent=data.status==='running'?name:`${name} 完了`;
-        if (data.status==='running') window.aiCore.setState(data.stage==='intent'?'analyzing':data.stage==='tool'?'tool':data.stage==='cloud_llm'?'cloud':'thinking');
-        else if (active) { active.stageTotals[data.stage]=(active.stageTotals[data.stage]||0)+(data.exclusive_sec ?? data.duration_sec); stageTimes($('live-stage-times'),{stage_totals:active.stageTotals}); }
+        if (data.status==='running') {
+          window.aiCore.setState(data.stage==='intent'?'analyzing':data.stage==='tool'?'tool':data.stage==='cloud_llm'?'cloud':'thinking');
+          pushStageTrail(`${name} 開始`, 'running');
+        }
+        else if (active) {
+          active.stageTotals[data.stage]=(active.stageTotals[data.stage]||0)+(data.exclusive_sec ?? data.duration_sec);
+          stageTimes($('live-stage-times'),{stage_totals:active.stageTotals});
+          pushStageTrail(`${name} 完了`, 'done');
+        }
       }
     },
     complete(data) {
       if (!active || active.completed) return;
+      window.dispatchEvent(new CustomEvent('jarvis:request-finished',{detail:{ok:successful(data),route:data.route,elapsed:data.execution?.server_elapsed_sec,reply_style:data.reply_style}}));
       active.completed=true; clearInterval(clock); drawLive(); $('live-stage').textContent=successful(data)?'完了':'失敗';
+      pushStageTrail(successful(data)?'応答完了':'応答失敗', successful(data)?'done':'error');
       active.request_id=data.execution?.request_id || data.evaluation?.request_id;
       active.execution=data.execution || {};
       active.client_timings.first_text_display_sec=(performance.now()-active.start)/1000;
@@ -221,7 +271,7 @@
       const record={request_id:active.request_id,session_id:active.session_id,message:active.message,created_at:Date.now()/1000,execution:active.execution,client_timings:active.client_timings,success:successful(data),route:data.route,start:active.start};
       records.set(record.request_id,record); conversationTiming(record); logTimings(record); renderHistory();
     },
-    fail() { clearInterval(clock); drawLive(); if (active) active.completed=true; $('live-stage').textContent='通信 / 実行エラー'; },
+    fail() { if(!active || active.completed)return; window.dispatchEvent(new CustomEvent('jarvis:request-failed')); clearInterval(clock); drawLive(); if (active) { active.completed=true; pushStageTrail('通信 / 実行エラー','error'); } $('live-stage').textContent='通信 / 実行エラー'; },
     recognition(event) { if (event==='start') recognitionStart=performance.now(); else if (event==='end' && recognitionStart!=null) recognitionResult={duration:(performance.now()-recognitionStart)/1000,text:$('message').value}; else if(event==='error') recognitionResult=null; },
     speech(event,id) {
       const record=records.get(id); if (!record) return;
@@ -234,8 +284,17 @@
   window.initWorkbench=()=>{
     document.querySelectorAll('[data-run]').forEach(button=>button.addEventListener('click',()=>runTool(button.dataset.run)));
     $('reload-processing').addEventListener('click',loadHistory);
-    $('reset-btn').addEventListener('click',()=>{records.clear();clearInterval(clock);active=null;renderHistory();});
-    $('session-id').addEventListener('change',()=>{records.clear();loadHistory();});
+    $('history-query').addEventListener('input',renderHistory);
+    $('history-status').addEventListener('change',renderHistory);
+    $('export-processing-json').addEventListener('click',()=>{
+      const session=$('session-id').value;
+      const rows=[...records.values()].filter(row=>row.session_id===session).map(({start,speechQueued,speechStarted,...record})=>record);
+      const blob=new Blob([JSON.stringify({schema_version:1,exported_at:new Date().toISOString(),session_id:session,records:rows},null,2)],{type:'application/json'});
+      const url=URL.createObjectURL(blob),download=node('a');download.href=url;download.download='ai-processing-'+new Date().toISOString().replace(/[:.]/g,'-')+'.json';download.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
+    });
+    const resetSession=()=>{historyVersion++;records.clear();knownCards.clear();suppressed.clear();clearInterval(clock);active=null;recognitionResult=null;$('live-stage').textContent='待機中';$('live-elapsed').replaceChildren(document.createTextNode('0.000 '),node('small','秒'));$('live-stage-times').replaceChildren();$('performance-chart').replaceChildren();renderHistory();window.dispatchEvent(new CustomEvent('jarvis:session-reset'));};
+    $('reset-btn').addEventListener('click',resetSession);
+    $('session-id').addEventListener('change',()=>{resetSession();loadHistory();});
     loadHistory();
     // 形状は固定した少数のDOM要素。フレームごとの粒子生成は行わない。
     const core=$('ai-core');

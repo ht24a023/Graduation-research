@@ -59,7 +59,7 @@ def test_workbench_real_tools_panel_policy_and_fixed_composer(tmp_path, monkeypa
                 page.set_viewport_size({'width':width,'height':height})
                 box=page.locator('#message').bounding_box()
                 assert box['y']>=0 and box['y']+box['height']<=height
-                assert page.evaluate('document.documentElement.scrollHeight<=innerHeight')
+                assert page.evaluate('document.documentElement.scrollHeight<=innerHeight'), (width,height,page.evaluate('({scroll:document.documentElement.scrollHeight,body:document.body.scrollHeight,shell:document.querySelector(".jarvis-shell").getBoundingClientRect().toJSON()})'))
             session=page.locator('#session-id').input_value()
             csv=page.request.get(base+'/processing/export.csv?session_id='+session)
             assert csv.status==200 and 'server_local_llm_sec' in csv.text()

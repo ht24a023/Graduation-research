@@ -84,7 +84,12 @@ def _cache_set(details):
 
 def get_location_details(use_cache: bool = True):
 
-    """Return rough IP-based location details as a dictionary."""
+    """Return a rough, non-exact IP-based location estimate.
+
+    This result is only an approximation from public IP geo-location and may be wrong.
+    When the user provides a more reliable manual location, that manual value should be
+    treated as the authoritative source instead of this estimate.
+    """
 
     if use_cache and _cache_valid():
         cached = _cache_get()
@@ -134,9 +139,10 @@ def get_location_details(use_cache: bool = True):
 
 def get_current_location():
 
-    """Return a rough current location based on public IP geolocation.
+    """Return a rough current location estimate from public IP geolocation.
 
-    Falls back to a fixed placeholder when the network lookup fails.
+    This is not exact and may be incorrect; user-entered location should take precedence
+    when available.
     """
 
     details = get_location_details()

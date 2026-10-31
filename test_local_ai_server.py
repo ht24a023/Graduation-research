@@ -98,6 +98,26 @@ class LocalAIServerTests(unittest.TestCase):
         self.assertIn("saved_cost_yen", result["evaluation"])
         self.assertIn("api_reduction_rate", result["evaluation"])
 
+    def test_build_location_weather_payload_prefers_manual_location_over_ip_guess(self):
+        payload = local_ai_server._build_location_weather_payload(
+            requested_mode="ip",
+            location_details={
+                "city": "京都",
+                "region": "京都府",
+                "country": "JP",
+                "latitude": 35.0211,
+                "longitude": 135.7556,
+                "provider": "ipapi.co",
+            },
+            manual_label="大阪府",
+            fallback_reason="ip fallback",
+        )
+
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["location"]["mode"], "manual")
+        self.assertEqual(payload["location"]["city"], "大阪府")
+        self.assertIn("大阪府", payload["location"]["label"])
+
     def test_build_chat_payload_records_experiment_mode_and_test_case(self):
         with patch.object(local_ai_server, "ask_local_llm", return_value="了解です。"):
             result = local_ai_server._build_chat_payload(

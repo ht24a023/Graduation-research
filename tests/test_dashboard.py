@@ -46,3 +46,37 @@ def test_json_and_stream_keep_same_success_payload():
     with patch.object(server, '_build_chat_payload', return_value=payload):
         events = list(server._chat_activity_events('hello', 'isolated'))
     assert events[-1]['data'] is payload
+
+
+def test_chat_assist_payload_detects_tool_intent_and_suggestions():
+    payload = server._build_chat_assist_payload('次の文章を英語に翻訳して：こんにちは', 'assist-session')
+    assert payload['ok']
+    assert payload['tool_kind'] == 'translate'
+    assert payload['route_hint'] == 'local_function'
+    assert payload['confidence'] >= 0.7
+    assert payload['suggestions']
+
+
+def test_chat_assist_payload_for_empty_message_returns_idle_state():
+    payload = server._build_chat_assist_payload('', 'assist-session')
+    assert payload['ok']
+    assert payload['intent'] == 'idle'
+    assert payload['confidence'] == 0.0
+    assert len(payload['suggestions']) >= 3
+
+
+def test_followup_suggestions_for_search_route_are_generated():
+    items = server._build_followup_suggestions(
+        route='local_search',
+        message='生成AIの最新動向を調べて',
+        response_text='検索結果の要約です。',
+    )
+    assert len(items) == 3
+    assert all('message' in item and item['message'] for item in items)
+
+
+def test_build_chat_payload_includes_followups_on_success():
+    payload = server._build_chat_payload('今何時？', 'followup-session')
+    assert payload['ok']
+    assert isinstance(payload.get('followups'), list)
+    assert payload['followups']

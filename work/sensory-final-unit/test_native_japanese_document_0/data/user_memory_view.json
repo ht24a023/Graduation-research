@@ -1,0 +1,28 @@
+{
+  "profile": {
+    "name": "",
+    "location": "",
+    "likes": [],
+    "dislikes": [],
+    "facts": [],
+    "updated_at": "2026-11-01T05:31:38"
+  },
+  "notes": [],
+  "keep_requests": [
+    {
+      "type": "document",
+      "doc_id": "DOC000001",
+      "title": "確認文書",
+      "file_path": "data/documents/DOC000001_20261101_053138.txt",
+      "chars": 5,
+      "checksum": "7f5796bccafea315ae12537a27d858e46e9b5603",
+      "preview": "実際の本文",
+      "source": "",
+      "saved_at": "2026-11-01T05:31:38"
+    }
+  ],
+  "profile_updated_at": "2026-11-01T05:31:38",
+  "notes_updated_at": "2026-11-01T05:31:38",
+  "keep_requests_updated_at": "2026-11-01T05:31:38",
+  "synced_at": "2026-11-01T05:31:38"
+}
