@@ -63,3 +63,18 @@ def test_unavailable_process_count_is_not_claimed_as_zero():
     with patch('functions.system_monitor.psutil.pids', side_effect=OSError('unavailable')):
         data = SystemMonitor().snapshot()
     assert data['process']['system_process_count'] is None
+
+def test_drive_snapshot_preserves_unavailable_volumes_and_deduplicates_mounts():
+    monitor = SystemMonitor()
+    partitions = [SimpleNamespace(device='C:', mountpoint='C:/', fstype='NTFS', opts='rw'),
+                  SimpleNamespace(device='D:', mountpoint='D:/', fstype='', opts='cdrom'),
+                  SimpleNamespace(device='C:', mountpoint='C:/', fstype='NTFS', opts='rw')]
+    with patch('functions.system_monitor.psutil.disk_partitions', return_value=partitions), \
+         patch('functions.system_monitor.psutil.disk_usage', side_effect=[
+             SimpleNamespace(total=1000, used=250, free=750, percent=25), OSError('no media')]) as usage:
+        rows = monitor._drive_snapshot(100)
+        assert len(rows) == 2
+        assert rows[0]['free_bytes'] == 750
+        assert rows[1]['available'] is False and rows[1]['free_bytes'] is None
+        assert monitor._drive_snapshot(110) is rows
+        assert usage.call_count == 2

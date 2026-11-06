@@ -16,3 +16,5 @@ psutil>=5.9
 qrcode>=7.4
 icalendar>=6,<8
 recurring-ical-events>=3,<4
+
+httpx>=0.27,<1

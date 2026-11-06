@@ -52,7 +52,7 @@
     for(const item of logs){const row=make('div');row.append(make('time',new Date(item.at).toLocaleTimeString('ja-JP',{hour12:false})),make('span',item.label));box.append(row);}if(bottom)box.scrollTop=box.scrollHeight;
   }
   function renderLatency(){
-    const svg=$('audio-rtt-chart');svg.replaceChildren();const ns='http://www.w3.org/2000/svg';const max=Math.max(1,...latencies.filter(s=>s.ok).map(s=>s.ms));
+    const svg=$('audio-rtt-chart');if(!svg)return;svg.replaceChildren();const ns='http://www.w3.org/2000/svg';const max=Math.max(1,...latencies.filter(s=>s.ok).map(s=>s.ms));
     for(let i=1;i<latencies.length;i++){const a=latencies[i-1],b=latencies[i];if(!a.ok||!b.ok)continue;const line=document.createElementNS(ns,'line');line.setAttribute('x1',String((i-1)/29*280+10));line.setAttribute('x2',String(i/29*280+10));line.setAttribute('y1',String(50-a.ms/max*40));line.setAttribute('y2',String(50-b.ms/max*40));line.setAttribute('stroke','#68d9ed');line.setAttribute('stroke-width','2');svg.append(line);}
     const valid=latencies.filter(s=>s.ok).map(s=>s.ms);text('audio-rtt-summary',valid.length?`${valid.length}回 / 平均 ${(valid.reduce((a,b)=>a+b,0)/valid.length).toFixed(1)} ms / 最大 ${Math.max(...valid).toFixed(1)} ms`:'成功した測定はありません');
   }
@@ -69,6 +69,7 @@
   };
   window.aiSensory={configureUtterance:configure,signal,frame(samples,rms){draw(samples,rms);},transcript,speech,replyStyle:()=>prefs.reply_style};
   window.initSensoryUI=()=>{
+    window.detailExplorer?.register('audio',()=>({preferences:prefs,signal:currentSignal,round_trip_samples:latencies,events:logs,latest_transcript:lastTranscript}));
     if($('ai-signal'))return;
     const signalBox=make('div',null,'ai-signal');signalBox.id='ai-signal';signalBox.innerHTML='<div><span id="ai-signal-label">MIC / OFF</span><button type="button" id="ai-link-rtt">LINK / 測定中</button></div><canvas id="ai-signal-canvas" width="600" height="64" aria-label="実測したマイク入力の波形"></canvas><div id="ai-live-caption" hidden></div>';
     $('core-state-label').after(signalBox);$('ai-link-rtt').addEventListener('click',()=>window.dashboardPanels.open('audio',{source:'manual'}));draw(null,0,true);
@@ -80,12 +81,12 @@
     if(!supported)text('audio-speech-status','このブラウザーは読み上げに対応していません。');else{voices();window.speechSynthesis.addEventListener('voiceschanged',voices);}
     $('audio-preview').addEventListener('click',()=>{if(mic||currentSignal.startsWith('recognition')||window.workbench.busy()||window.speechSynthesis.speaking){text('audio-speech-status','音声入力・処理・読み上げが終わってから試してください。');return;}const u=new SpeechSynthesisUtterance('音声設定を確認します。');configure(u);preview=u;u.onstart=()=>text('audio-speech-status','試聴中');u.onend=()=>{preview=null;text('audio-speech-status','試聴完了');};u.onerror=()=>{preview=null;text('audio-speech-status','試聴を終了しました。');};window.speechSynthesis.speak(u);});
     $('audio-stop').addEventListener('click',()=>{$('speech-stop').click();window.speechSynthesis?.cancel();speech('stopped');});
-    $('audio-clear-transcript').addEventListener('click',()=>{lastTranscript='';text('audio-transcript','');text('audio-transcript-state','消去済み');text('ai-live-caption','');$('ai-live-caption').hidden=true;});
+    $('audio-clear-transcript').addEventListener('click',()=>{window.detailExplorer?.closeTopic('audio');lastTranscript='';text('audio-transcript','');text('audio-transcript-state','消去済み');text('ai-live-caption','');$('ai-live-caption').hidden=true;});
     $('audio-measure').addEventListener('click',measure);$('audio-auto-rtt').checked=prefs.auto;$('audio-auto-rtt').addEventListener('change',()=>{prefs.auto=$('audio-auto-rtt').checked;persist();clearTimeout(poll);if(prefs.auto)measure();});
     $('audio-export-rtt').addEventListener('click',()=>download('ai-server-rtt.json',{source:'browser_http_round_trip',endpoint:'/system/clock',samples:latencies}));
-    $('audio-export-log').addEventListener('click',()=>download('ai-process-events.json',{clock:'browser',events:logs}));$('audio-clear-log').addEventListener('click',()=>{logs=[];$('audio-process-log').replaceChildren();});
+    $('audio-export-log').addEventListener('click',()=>download('ai-process-events.json',{clock:'browser',events:logs}));$('audio-clear-log').addEventListener('click',()=>{window.detailExplorer?.closeTopic('audio');logs=[];$('audio-process-log').replaceChildren();});
     window.addEventListener('jarvis:request-start',()=>addLog('start'));window.addEventListener('jarvis:execution-event',event=>{if(event.detail.kind==='stage')addLog('stage',event.detail.data);});window.addEventListener('jarvis:request-failed',()=>addLog('error'));
-    window.addEventListener('jarvis:request-finished',event=>{addLog('finish',event.detail);const bubbles=$('chat-log').querySelectorAll('.bubble.assistant');const bubble=bubbles[bubbles.length-1];if(bubble&&!bubble.querySelector('.response-profile')){const chip=make('div',`文体設定：${styles[event.detail.reply_style]||'標準'} / ${event.detail.route||'経路未記録'}`,'response-profile');bubble.append(chip);}});
+    window.addEventListener('jarvis:request-finished',event=>{addLog('finish',event.detail);const bubbles=$('chat-log').querySelectorAll('.bubble.assistant');const bubble=bubbles[bubbles.length-1];if(bubble&&!bubble.querySelector('.response-profile')){const chip=make('div',`${event.detail.ok?'完了':'失敗'} / サーバー ${typeof event.detail.elapsed==='number'?event.detail.elapsed.toFixed(3)+'秒':'未計測'} / ${{local_llm:'ローカルAI',cloud_fallback:'クラウドAI',local_function:'ローカル機能',local_search:'検索'}[event.detail.route]||event.detail.route||'処理元未記録'} / 文体：${styles[event.detail.reply_style]||'標準'}`,'response-profile');bubble.append(chip);}});
     window.addEventListener('jarvis:session-reset',()=>{logs=[];$('audio-process-log').replaceChildren();});
     window.addEventListener('pagehide',()=>{disposed=true;measureVersion++;clearTimeout(poll);preview=null;});window.addEventListener('pageshow',event=>{if(event.persisted){disposed=false;measure();}});
     document.addEventListener('visibilitychange',()=>{if(document.hidden){clearTimeout(poll);}else if(prefs.auto)measure();});measure();

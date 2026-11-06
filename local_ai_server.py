@@ -61,6 +61,7 @@ from functions.research_tools import translate_text_structured, wikipedia_summar
 from functions.dashboard_tools import youtube_results, local_qr
 from functions.reply_style import normalize_style, style_prompt
 from functions import mission_control, apple_sync
+from models.request_control import RequestCancelled as ChatCancelled, request_scope, check_cancelled
 from models.execution_trace import (traced_request, run_stage, add_card, mark_text_ready,
                                     event_sink, processing_history, save_client_timings, processing_csv)
 
@@ -70,6 +71,7 @@ def _tool_call(kind, function, *args, **kwargs):
         if isinstance(value, dict):
             return bool(value.get('ok', True))
         return not (isinstance(value, str) and re.search(r'取得できません|取得に失敗|検索に失敗|失敗しました|未設定です|特定できません', value))
+    _check_chat_cancelled()
     result = run_stage('tool', function, *args, tool_name=kind, success_check=outcome, **kwargs)
     if kind == 'document':
         if isinstance(result, dict) and ('document' in result or 'documents' in result):
@@ -173,7 +175,29 @@ def _dispatch_dashboard_tool(request):
 _ACTIVITY = threading.local()
 
 
+_CHAT_CANCEL_LOCK = threading.Lock()
+_CHAT_CANCEL = {}
+_CHAT_FINISHED = {}
+_CHAT_OPERATIONS = {}
+
+
+def _check_chat_cancelled():
+    check_cancelled()
+    signal = getattr(_ACTIVITY, 'cancelled', None)
+    if signal is not None and signal.is_set():
+        raise ChatCancelled('要求は停止されました')
+
+
+def _cancel_chat(session_id, token):
+    with _CHAT_CANCEL_LOCK:
+        signal = _CHAT_CANCEL.get((session_id, token))
+        if signal is not None:
+            signal.set()
+        return signal is not None
+
+
 def _notify_activity(state):
+    _check_chat_cancelled()
     callback = getattr(_ACTIVITY, "callback", None)
     if callback:
         callback({"state": state})
@@ -181,40 +205,108 @@ def _notify_activity(state):
 
 def ask_local_llm(*args, **kwargs):
     _notify_activity("thinking")
-    return _ask_local_llm(*args, **kwargs)
+    result = _ask_local_llm(*args, **kwargs)
+    _check_chat_cancelled()
+    return result
 
 
 def ask_cloud_ai(*args, **kwargs):
     _notify_activity("cloud")
-    return _ask_cloud_ai(*args, **kwargs)
+    result = _ask_cloud_ai(*args, **kwargs)
+    _check_chat_cancelled()
+    return result
 
 
-def _chat_activity_events(message, session_id, **kwargs):
-    """通常の/chat処理を維持し、状態と最終結果のみを別スレッドから通知。"""
-    events = queue.Queue()
-
+def _chat_activity_events(message, session_id, request_token='', operation_id='', stream_body=False, **kwargs):
+    """Replay one logical operation across retries; cancel only its own HTTP transports."""
+    operation_key = (session_id, operation_id or uuid4().hex)
+    fingerprint = json.dumps([message, stream_body, kwargs], sort_keys=True, ensure_ascii=False)
+    token_key = (session_id, request_token)
+    with _CHAT_CANCEL_LOCK:
+        now = time.monotonic()
+        for key, value in list(_CHAT_OPERATIONS.items()):
+            if value['finished'].is_set() and now-value['finished_at'] > 600:
+                _CHAT_OPERATIONS.pop(key, None)
+        record = _CHAT_OPERATIONS.get(operation_key)
+        if record is not None and record['fingerprint'] != fingerprint:
+            mismatch = True
+        else:
+            mismatch = False
+        created = record is None
+        if created:
+            completed = [key for key, value in _CHAT_OPERATIONS.items() if value['finished'].is_set()]
+            while len(_CHAT_OPERATIONS) >= 128 and completed:
+                _CHAT_OPERATIONS.pop(completed.pop(0), None)
+            if len(_CHAT_OPERATIONS) >= 128:
+                record = None
+            else:
+                record = {'fingerprint': fingerprint, 'signal': threading.Event(),
+                          'finished': threading.Event(), 'finished_at': now,
+                          'condition': threading.Condition(), 'events': []}
+                _CHAT_OPERATIONS[operation_key] = record
+        if record is not None and not mismatch and request_token:
+            _CHAT_CANCEL[token_key] = record['signal']
+            _CHAT_FINISHED[token_key] = record['finished']
+    if mismatch or record is None:
+        yield {'event':'error', 'data':{'ok':False, 'error':'要求IDが重複しています。' if mismatch else '処理中の要求が多いため、しばらく待ってください。'}}
+        return
+    cancelled = record['signal']
+    def publish(event):
+        with record['condition']:
+            record['events'].append(event)
+            record['condition'].notify_all()
     def work():
-        _ACTIVITY.callback = lambda data: events.put({"event": "status", "data": data})
+        _ACTIVITY.cancelled = cancelled
+        _ACTIVITY.callback = lambda data: publish({'event':'status', 'data':data})
         try:
-            _notify_activity("analyzing")
-            with event_sink(events.put):
-                payload = _build_chat_payload(message, session_id, **kwargs)
-            events.put({"event": "done" if payload.get("ok") else "error", "data": payload})
+            with request_scope(cancelled), event_sink(publish):
+                _notify_activity('analyzing')
+                if stream_body:
+                    for event in _stream_chat_payload(message, session_id, **kwargs):
+                        _check_chat_cancelled()
+                        if event['event'] in {'done', 'error'}:
+                            event['data'].setdefault('ok', event['event']=='done')
+                        publish(event)
+                else:
+                    payload = _build_chat_payload(message, session_id, **kwargs)
+                    _check_chat_cancelled()
+                    publish({'event':'done' if payload.get('ok') else 'error', 'data':payload})
+        except ChatCancelled:
+            publish({'event':'error', 'data':{'ok':False, 'cancelled':True, 'error':'停止しました。'}})
         except Exception:
-            events.put({"event": "error", "data": {"ok": False, "error": "処理中にエラーが発生しました。"}})
+            publish({'event':'error', 'data':{'ok':False, 'error':'処理中にエラーが発生しました。'}})
         finally:
             del _ACTIVITY.callback
-
-    threading.Thread(target=work, daemon=True).start()
-    while True:
-        try:
-            event = events.get(timeout=10)
-        except queue.Empty:
-            yield {"event": "ping", "data": {}}
-            continue
-        yield event
-        if event["event"] in {"done", "error"}:
-            break
+            del _ACTIVITY.cancelled
+            record['finished_at'] = time.monotonic()
+            record['finished'].set()
+            with record['condition']:
+                record['condition'].notify_all()
+    if created:
+        threading.Thread(target=work, daemon=True).start()
+    cursor = 0
+    try:
+        while True:
+            with record['condition']:
+                if cursor >= len(record['events']) and not record['finished'].is_set():
+                    record['condition'].wait(timeout=5)
+                pending = record['events'][cursor:]
+                cursor += len(pending)
+                finished = record['finished'].is_set()
+            for event in pending:
+                yield event
+                if event['event'] in {'done','error'}:
+                    return
+            if finished:
+                return
+            if not pending:
+                yield {'event':'ping','data':{}}
+    finally:
+        if request_token:
+            with _CHAT_CANCEL_LOCK:
+                if _CHAT_CANCEL.get(token_key) is cancelled:
+                    _CHAT_CANCEL.pop(token_key, None)
+                    _CHAT_FINISHED.pop(token_key, None)
 
 
 # サーバー全体で使う基本設定
@@ -416,6 +508,7 @@ def _get_history(session_id: str) -> deque[dict[str, str]]:
 
 
 def _append_turn(session_id: str, role: str, content: str) -> None:
+    _check_chat_cancelled()
     history = _get_history(session_id)
     history.append({"role": role, "content": content})
 
@@ -1749,7 +1842,10 @@ def _build_chat_payload(
   tool_request: dict | None = None,
   turbo_mode: bool = False,
   reply_style: str = "standard",
+  regenerate: bool = False,
+  regenerate_from: str = "",
 ) -> dict[str, Any]:
+  _check_chat_cancelled()
   reply_style = normalize_style(reply_style)
   message = (message or "").strip()
   current_location = (current_location or "").strip()
@@ -1787,7 +1883,7 @@ def _build_chat_payload(
   cache_key += "|reply-style=" + reply_style
   requested_tool = tool_request or run_stage('intent', _parse_dashboard_request, effective_message)
   # Live/tool results must be obtained again, including their result cards.
-  cacheable_request = _is_cacheable_message(effective_message) and not clarification_followup and not requested_tool
+  cacheable_request = not regenerate and _is_cacheable_message(effective_message) and not clarification_followup and not requested_tool
 
   def finalize(
     *,
@@ -1799,6 +1895,7 @@ def _build_chat_payload(
     fallback_used: bool = False,
     extra: dict[str, Any] | None = None,
   ) -> dict[str, Any]:
+    _check_chat_cancelled()
     response_text = (response or "").strip() if ok else (error or "").strip()
     payload: dict[str, Any] = {
       "ok": ok,
@@ -1845,6 +1942,22 @@ def _build_chat_payload(
       api_called=api_called,
       success=ok,
     )
+
+  if regenerate:
+    # Regenerate wording from the selected answer, without repeating its tools/actions.
+    prompt = build_local_prompt(
+      '次の質問への回答を再生成してください。既存の回答に含まれる取得済み情報を使い、'
+      '外部操作や情報の再取得を実行したとは述べないでください。\n'
+      + '質問：' + message + '\n既存の回答：' + str(regenerate_from)[:30000],
+      conversation_history=[], user_profile_context='')
+    local_started = time.perf_counter()
+    response = ask_local_llm(style_prompt(prompt, reply_style), timeout=REQUEST_TIMEOUT)
+    local_time_sec += time.perf_counter() - local_started
+    if _looks_like_llm_error(response):
+      return finalize(ok=False, route='error', error=response)
+    _append_turn(session_id, 'user', message)
+    _append_turn(session_id, 'assistant', response)
+    return finalize(ok=True, route='local_llm', response=response, extra={'regenerated': True})
 
   if not tool_request and not approve_token and not reject_token and cacheable_request:
     cached = _get_cached_response(cache_key)
@@ -2522,6 +2635,7 @@ def _stream_chat_payload(
 HTML_PAGE = r"""<!doctype html>
 <html lang="ja">
 <head>
+<meta name="central-chat-revision" content="20261101-cancel-v2">
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Local AI Server</title>
@@ -3767,13 +3881,34 @@ HTML_PAGE = r"""<!doctype html>
         </div>
         <div class="panel-body chat-body">
           <div id="chat-log"></div>
+          <div class="browser-pane" id="browser-pane" hidden>
+            <div class="browser-bar">
+              <input id="browser-search" type="text" placeholder="Web検索またはURLを入力…" aria-label="ブラウザ検索" />
+              <button id="browser-search-btn" type="button">検索</button>
+              <button id="browser-close-btn" class="secondary" type="button">閉じる</button>
+            </div>
+            <div class="browser-preview" aria-live="polite">
+              <div class="browser-placeholder">ブラウザを開くには「検索」を押してください。<br>ここで参照しながら、そのままチャットを続けられます。</div>
+            </div>
+          </div>
           <div class="composer">
-            <label class="composer-label" for="message">メッセージ</label><textarea id="message" aria-label="メッセージ" placeholder="メッセージを入力…（Shift + Enterで改行）"></textarea>
+            <div class="work-description-wrap">
+              <div class="work-description-header">
+                <label class="composer-label" for="work-description">作業説明</label>
+                <button id="copy-work-description" class="secondary" type="button">メッセージへ反映</button>
+              </div>
+              <textarea id="work-description" aria-label="作業説明" placeholder="今やっている内容、目的、進捗、困っている点を簡潔に書いてください。別のAIに説明するときに使えます。"></textarea>
+            </div>
+            <div class="chat-actions-row">
+              <button id="browser-toggle-btn" type="button" class="secondary">ブラウザ</button>
+              <button id="chat-browser-mode-btn" type="button" class="secondary">Chat + Browser</button>
+            </div>
+            <label class="composer-label" for="message">メッセージ</label><textarea id="message" aria-label="メッセージ" placeholder="メッセージを入力…（Enterで送信 / Shift + Enterで改行）"></textarea>
             <div class="row">
               <input id="session-id" placeholder="session id" />
               <input id="current-location" placeholder="現在地（任意）" />
               <label class="turbo-toggle" title="低遅延優先。クラウドフォールバックを抑制します。"><input id="turbo-mode" type="checkbox" /> Turbo</label>
-              <button id="send-btn" type="button">送信</button>
+              <button id="send-btn" type="button">送信</button><button id="chat-stop" type="button" hidden>停止</button>
               <button id="reset-btn" class="secondary" type="button">新しい会話</button>
             </div>
           </div>
@@ -3873,9 +4008,14 @@ HTML_PAGE = r"""<!doctype html>
 
   <script src="/site/maps/topojson-client.min.js"></script>
   <script src="/site/dashboard/dashboard.js"></script>
+  <script src="/site/dashboard/chat_utilities.js"></script>
   <script src="/site/dashboard/workbench.js"></script>
   <script src="/site/dashboard/desktop.js"></script>
   <script src="/site/dashboard/maximalist.js"></script>
+  <script src="/site/dashboard/details.js"></script>
+  <link rel="stylesheet" href="/site/dashboard/left_monitor.css" />
+  <script src="/site/dashboard/left_monitor.js"></script>
+  <script src="/site/dashboard/detail_sources.js"></script>
   <script src="/site/dashboard/operations.js"></script>
   <script src="/site/dashboard/sensory.js"></script>
   <script src="/site/dashboard/task_state.js"></script>
@@ -3886,6 +4026,47 @@ HTML_PAGE = r"""<!doctype html>
   <script src="/site/dashboard/spatial.js"></script>
   <script>
     const chatLog = document.getElementById('chat-log');
+    // 中央chat担当: keep the reader's position until they choose to follow again.
+    let chatFollowingLatest = true;
+    const chatLatestButton = document.createElement('button');
+    chatLatestButton.id = 'chat-jump-latest';
+    chatLatestButton.type = 'button';
+    chatLatestButton.textContent = '↓ 最新へ';
+    chatLatestButton.hidden = true;
+    chatLatestButton.setAttribute('aria-label', '会話の最新の内容へ移動');
+    chatLatestButton.setAttribute('aria-controls', 'chat-log');
+    chatLog.after(chatLatestButton);
+    function chatNearLatest() {
+      return chatLog.scrollHeight - chatLog.clientHeight - chatLog.scrollTop <= 48;
+    }
+    function followChatLatest(force = false) {
+      if (force) chatFollowingLatest = true;
+      if (chatFollowingLatest) chatLog.scrollTop = chatLog.scrollHeight;
+      chatLatestButton.hidden = chatFollowingLatest;
+      if (!chatFollowingLatest) chatLatestButton.textContent = '↓ 新しい内容 · 最新へ';
+    }
+    chatLog.addEventListener('scroll', () => {
+      chatFollowingLatest = chatNearLatest();
+      chatLatestButton.hidden = chatFollowingLatest;
+      if (chatFollowingLatest) chatLatestButton.textContent = '↓ 最新へ';
+    }, {passive: true});
+    chatLatestButton.addEventListener('click', () => followChatLatest(true));
+    new ResizeObserver(() => {
+      if (chatFollowingLatest) followChatLatest();
+      else chatLatestButton.hidden = chatNearLatest();
+    }).observe(chatLog);
+
+    // Character updates include incremental/streaming answer text. One layout per frame.
+    let chatScrollFrame = null;
+    const chatContentObserver = new MutationObserver(() => {
+      if (chatScrollFrame !== null) return;
+      chatScrollFrame = requestAnimationFrame(() => {
+        chatScrollFrame = null;
+        followChatLatest();
+      });
+    });
+    chatContentObserver.observe(chatLog, {childList:true, characterData:true, subtree:true});
+
     const messageInput = document.getElementById('message');
     const sessionInput = document.getElementById('session-id');
     const locationInput = document.getElementById('current-location');
@@ -5035,16 +5216,95 @@ HTML_PAGE = r"""<!doctype html>
         .replace(/'/g, '&#39;');
     }
 
+    function buildCloudVerificationPrompt(lastQuestion, localAnswer) {
+      const question = String(lastQuestion || '').trim();
+      const answer = String(localAnswer || '').trim();
+      if (!question || !answer) {
+        return '';
+      }
+      return [
+        '前回の質問とローカル回答をもとに、クラウドAIで再検証してください。',
+        '厳密に比較し、どこが妥当か・不足しているか・最終判断を簡潔に返してください。',
+        '',
+        '--- 前回の質問 ---',
+        question,
+        '',
+        '--- ローカル回答 ---',
+        answer,
+        '',
+        '--- 出力指示 ---',
+        '1. 重要な誤りがあれば指摘する',
+        '2. 追加で確認すべき点を3点以内で示す',
+        '3. 最終結論を1〜3文でまとめる',
+      ].join(String.fromCharCode(10));
+    }
+
     function linkifyText(text) {
       const escaped = escapeHtml(text);
       const urlPattern = new RegExp('(https?://[^\\\\s<]+)', 'g');
       return escaped.replace(urlPattern, (url) => `<a href="${url}" target="_blank" rel="noopener noreferrer">${url}</a>`);
     }
 
+    function renderChatContent(body, rawText) {
+      const pattern = /```[^\n`]*\n([\s\S]*?)```/g;
+      let offset = 0, match;
+      const prose = text => {
+        const span = document.createElement('span');
+        span.innerHTML = linkifyText(text).split(String.fromCharCode(10)).join('<br>');
+        body.append(span);
+      };
+      while ((match = pattern.exec(rawText)) !== null) {
+        prose(rawText.slice(offset, match.index));
+        const pre = document.createElement('pre');
+        const code = document.createElement('code');
+        code.textContent = match[1];pre.append(code);body.append(pre);
+        offset = pattern.lastIndex;
+      }
+      prose(rawText.slice(offset));
+    }
+
     function addBubble(role, text) {
       const el = document.createElement('div');
       el.className = `bubble ${role}`;
       const rawText = String(text || '');
+      el.chatRawText = rawText;
+
+      if (role === 'assistant') {
+        const cloudButton = document.createElement('button');
+        cloudButton.type = 'button';
+        cloudButton.className = 'cloud-check-btn';
+        cloudButton.textContent = 'クラウドAIで再検証';
+        cloudButton.title = '前回の質問とローカル回答をクラウドAIに委託して再検証';
+        cloudButton.addEventListener('click', async () => {
+          const previousQuestion = chatLog.querySelector('.bubble.user:last-of-type')?.chatRawText || '';
+          const prompt = buildCloudVerificationPrompt(previousQuestion, rawText);
+          if (!prompt) {
+            cloudButton.disabled = true;
+            cloudButton.textContent = '比較対象なし';
+            return;
+          }
+          cloudButton.disabled = true;
+          cloudButton.textContent = '再検証中…';
+          try {
+            const result = await window.dashboardRequest({
+              message: prompt,
+              session_id: sessionInput.value.trim() || currentSessionId,
+              current_location: locationInput.value.trim(),
+              turbo_mode: turbomode.checked,
+              reply_style: window.aiSensory?.replyStyle() || 'standard',
+            });
+            const cloudBubble = addBubble('assistant', result.response || result.error || '再検証の結果が返ってきませんでした。');
+            cloudBubble.classList.add('cloud-verification-result');
+            cloudBubble.dataset.cloudVerification = 'true';
+            cloudButton.textContent = '再検証済み';
+            window.aiCore?.setState('cloud');
+          } catch (error) {
+            cloudButton.textContent = '再検証失敗';
+            addBubble('system', `クラウド再検証に失敗しました: ${error.message || error}`);
+          }
+        });
+        el.appendChild(cloudButton);
+      }
 
       const copyIconSvg = [
         '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">',
@@ -5094,10 +5354,10 @@ HTML_PAGE = r"""<!doctype html>
 
       const body = document.createElement('div');
       body.className = 'bubble-content';
-      body.innerHTML = linkifyText(rawText).split(String.fromCharCode(10)).join('<br>');
+      renderChatContent(body, rawText);
       el.appendChild(body);
       chatLog.appendChild(el);
-      chatLog.scrollTop = chatLog.scrollHeight;
+      followChatLatest();
       return el;
     }
 
@@ -5191,7 +5451,7 @@ HTML_PAGE = r"""<!doctype html>
       }
 
       chatLog.appendChild(wrap);
-      chatLog.scrollTop = chatLog.scrollHeight;
+      followChatLatest();
     }
 
     function addChoicePanel(ui) {
@@ -5241,7 +5501,7 @@ HTML_PAGE = r"""<!doctype html>
       });
 
       chatLog.appendChild(wrap);
-      chatLog.scrollTop = chatLog.scrollHeight;
+      followChatLatest();
     }
 
     function addPromptInputPanel(ui) {
@@ -5294,7 +5554,7 @@ HTML_PAGE = r"""<!doctype html>
       wrap.appendChild(row);
 
       chatLog.appendChild(wrap);
-      chatLog.scrollTop = chatLog.scrollHeight;
+      followChatLatest();
     }
 
     function addFollowupPanel(followups) {
@@ -5340,7 +5600,7 @@ HTML_PAGE = r"""<!doctype html>
       }
 
       chatLog.appendChild(wrap);
-      chatLog.scrollTop = chatLog.scrollHeight;
+      followChatLatest();
     }
 
     let documentCache = [];
@@ -5588,6 +5848,58 @@ HTML_PAGE = r"""<!doctype html>
       renderDocumentList(documentCache);
     }
 
+    function toggleBrowserPane(forceOpen) {
+      const pane = document.getElementById('browser-pane');
+      if (!pane) return;
+      const shouldOpen = typeof forceOpen === 'boolean' ? forceOpen : pane.hidden;
+      pane.hidden = !shouldOpen;
+      const toggle = document.getElementById('browser-toggle-btn');
+      const modeToggle = document.getElementById('chat-browser-mode-btn');
+      if (toggle) toggle.classList.toggle('is-active', shouldOpen);
+      if (modeToggle) modeToggle.classList.toggle('is-active', shouldOpen);
+      const shell = document.querySelector('.jarvis-shell');
+      if (shell) shell.classList.toggle('chat-browser-mode', shouldOpen);
+    }
+
+    function buildBrowserUrl(value) {
+      const trimmed = (value || '').trim();
+      if (!trimmed) return 'https://duckduckgo.com/?q=' + encodeURIComponent('local ai dashboard');
+      try {
+        const parsed = new URL(trimmed);
+        if (['http:', 'https:'].includes(parsed.protocol)) return parsed.href;
+      } catch (error) {
+        // URLではない入力は検索クエリとして扱う。
+      }
+      return 'https://duckduckgo.com/?q=' + encodeURIComponent(trimmed);
+    }
+
+    function openBrowserSearch() {
+      const target = document.getElementById('browser-search');
+      const value = (target ? target.value : '').trim();
+      const query = value || 'local ai dashboard';
+      const url = buildBrowserUrl(query);
+      const preview = document.querySelector('.browser-preview');
+      if (!preview) return;
+      preview.innerHTML = '';
+
+      const frame = document.createElement('iframe');
+      frame.title = 'ブラウザプレビュー';
+      frame.src = url;
+      frame.loading = 'lazy';
+      frame.referrerPolicy = 'strict-origin-when-cross-origin';
+      frame.sandbox = 'allow-scripts allow-forms allow-popups allow-same-origin allow-modals allow-downloads';
+      frame.setAttribute('allow', 'fullscreen');
+      preview.appendChild(frame);
+
+      const status = document.createElement('div');
+      status.className = 'browser-result';
+      status.textContent = `検索: ${query}`;
+      preview.appendChild(status);
+      if (typeof escapeHtml === 'function') {
+        status.textContent = `検索: ${query}`;
+      }
+    }
+
     function setStatus(text) {
       healthText.textContent = text;
       healthCard.textContent = text;
@@ -5669,22 +5981,29 @@ HTML_PAGE = r"""<!doctype html>
     }
 
     let isSending = false;
-    let queuedMessage = '';
+    window.addEventListener('jarvis:request-stopped',()=>{const status=document.getElementById('hud-message-info');if(status)status.textContent='STOPPED / 停止';});
+    const chatStop = document.getElementById('chat-stop');
+    chatStop.addEventListener('click', () => window.chatTransport?.stop());
+    function chatAction(bubble, label, action) {
+      const button = document.createElement('button');button.type = 'button';button.className = 'chat-action';button.dataset.chatAction = 'true';button.textContent = label;button.disabled = isSending;button.addEventListener('click', () => { if (!isSending && !window.workbench?.busy()) action(); });
+      bubble.append(button);return button;
+    }
+    function setChatBusy(value) {
+      chatStop.hidden = !value;
+      document.querySelectorAll('[data-chat-action]').forEach(button => button.disabled = value);
+    }
 
-    async function sendMessage() {
-      const text = messageInput.value.trim();
-      const sessionId = sessionInput.value.trim() || savedSessionId;
-      const currentLocation = locationInput.value.trim() || savedCurrentLocation;
+    async function sendMessage(options = {}) {
+      const text = String(options.message ?? messageInput.value).trim();
+      const sessionId = options.session_id || sessionInput.value.trim() || savedSessionId;
+      const currentLocation = options.current_location ?? (locationInput.value.trim() || savedCurrentLocation);
+      if (options.session_id && options.session_id !== sessionInput.value.trim()) return;
       if (!text) {
         return;
       }
 
       if (window.workbench?.busy() && !isSending) return;
-      if (isSending) {
-        queuedMessage = text;
-        messageInput.value = text;
-        return;
-      }
+      if (isSending) return;
 
       sessionInput.value = sessionId;
       safeStorageSet(storageKey, sessionId);
@@ -5692,20 +6011,42 @@ HTML_PAGE = r"""<!doctype html>
       sessionText.textContent = sessionId;
 
       isSending = true;
+      setChatBusy(true);
       sendBtn.disabled = true;
-      const turboMode = !!(turboModeInput && turboModeInput.checked);
+      const turboMode = options.turbo_mode ?? !!(turboModeInput && turboModeInput.checked);
+      const request = {message: text, session_id: sessionId, current_location: currentLocation, turbo_mode: turboMode, regenerate: !!options.regenerate, regenerate_from: options.regenerate_from || '', operation_id:options.operation_id||crypto.randomUUID(),reply_style:options.reply_style||window.aiSensory?.replyStyle()||'standard'};
       runtimeProcessing.textContent = turboMode ? '処理中 (Turbo)' : '処理中';
       window.aiCore.setState('thinking');
-      addBubble('user', text);
-      messageInput.value = '';
+      if (!options.reuseQuestion) {
+        const question = addBubble('user', text);
+        chatAction(question, '編集して再送信', () => { messageInput.value = text;messageInput.focus();messageInput.setSelectionRange(messageInput.value.length,messageInput.value.length); });
+      }
+      if (!options.reuseQuestion) messageInput.value = '';
 
       const typing = addBubble('system', 'thinking...');
+      let pendingStreamText = '', streamFrame = null;
+      typing.classList.add('chat-pending');
+      const flushStream = () => {
+        streamFrame=null;
+        if(!typing.isConnected)return;
+        const body=typing.querySelector('.bubble-content');
+        if(!typing.classList.contains('chat-streaming')){body.replaceChildren(document.createTextNode(''));typing.classList.add('chat-streaming');}
+        body.firstChild.appendData(pendingStreamText);pendingStreamText='';
+      };
+      const onChatDelta = event => {
+        if (event.detail.session_id !== sessionId) return;
+        pendingStreamText+=event.detail.delta;
+        if(streamFrame===null)streamFrame=requestAnimationFrame(flushStream);
+      };
+      window.addEventListener('jarvis:chat-delta', onChatDelta);
 
       try {
-        const data = await window.dashboardRequest({ message: text, session_id: sessionId, current_location: currentLocation, turbo_mode: turboMode });
+        const data = await window.dashboardRequest(request);
         typing.remove();
         if (data.ok) {
-          addBubble('assistant', data.response);
+          const answer = addBubble('assistant', data.response);
+          if(options.regenerate){const version=document.createElement('div');version.className='chat-version-label';version.textContent='再生成した回答（元の回答は保持）';answer.prepend(version);if(options.previousAnswer?.isConnected)options.previousAnswer.dataset.hasNewVersion='true';}
+          chatAction(answer, '再生成', () => sendMessage({...request, regenerate: true, regenerate_from: data.response, operation_id:crypto.randomUUID(), previousAnswer:answer, reuseQuestion: true}));
           addFollowupPanel(data.followups);
           window.workbench.complete(data);
           if (window.workbench.succeeded(data)) window.aiCore.answer(data.response, data.evaluation);
@@ -5729,28 +6070,22 @@ HTML_PAGE = r"""<!doctype html>
         }
       } catch (e) {
         typing.remove();
-        window.aiCore.setState('error');
-        window.workbench.fail();
-        const detail = e && e.message ? ` (${e.message})` : '';
-        addBubble('assistant', `通信に失敗しました。${detail}`);
-        appendRuntimeLog(`network error${detail}`);
-      } finally {
-        isSending = false;
-        runtimeProcessing.textContent = '待機中';
-
-        if (queuedMessage) {
-          const nextText = queuedMessage;
-          queuedMessage = '';
-          messageInput.value = nextText;
-          sendBtn.disabled = true;
-          setTimeout(() => {
-            if (!messageInput.value.trim()) {
-              messageInput.value = nextText;
-            }
-            sendMessage();
-          }, 0);
-          return;
+        if (e.name === 'ChatStopped') {
+          window.aiCore.setState('idle');
+          addBubble('system', e.serverFinished?'回答の受信を停止しました。サーバー処理の終了を確認しました。':'回答の受信を停止しました。サーバー処理の終了は未確認です。');
+        } else {
+          window.aiCore.setState('error');window.workbench.fail();
+          const detail = e && e.message ? ` (${e.message})` : '';
+          const failure = addBubble('assistant', `通信に失敗しました。${detail}`);
+          chatAction(failure, '再試行', () => sendMessage({...request, reuseQuestion: true}));
+          appendRuntimeLog(`network error${detail}`);
         }
+      } finally {
+        window.removeEventListener('jarvis:chat-delta', onChatDelta);
+        if(streamFrame!==null)cancelAnimationFrame(streamFrame);
+        isSending = false;
+        setChatBusy(false);
+        runtimeProcessing.textContent = '待機中';
 
         sendBtn.disabled = false;
         messageInput.focus();
@@ -5830,6 +6165,35 @@ HTML_PAGE = r"""<!doctype html>
         messageInput.focus();
       });
     });
+    const browserToggleBtn = document.getElementById('browser-toggle-btn');
+    const browserSearchBtn = document.getElementById('browser-search-btn');
+    const browserCloseBtn = document.getElementById('browser-close-btn');
+    const chatBrowserModeBtn = document.getElementById('chat-browser-mode-btn');
+    if (browserToggleBtn) {
+      browserToggleBtn.addEventListener('click', () => toggleBrowserPane());
+    }
+    if (browserSearchBtn) {
+      browserSearchBtn.addEventListener('click', openBrowserSearch);
+    }
+    if (browserCloseBtn) {
+      browserCloseBtn.addEventListener('click', () => toggleBrowserPane(false));
+    }
+    if (chatBrowserModeBtn) {
+      chatBrowserModeBtn.addEventListener('click', () => {
+        toggleBrowserPane(true);
+        const shell = document.querySelector('.jarvis-shell');
+        if (shell) shell.classList.add('chat-browser-mode');
+      });
+    }
+    const browserSearchInput = document.getElementById('browser-search');
+    if (browserSearchInput) {
+      browserSearchInput.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter') {
+          event.preventDefault();
+          openBrowserSearch();
+        }
+      });
+    }
     resetBtn.addEventListener('click', () => {
       safeStorageRemove(storageKey);
       const freshId = makeSessionId();
@@ -5837,6 +6201,7 @@ HTML_PAGE = r"""<!doctype html>
       sessionInput.value = freshId;
       sessionText.textContent = freshId;
       chatLog.innerHTML = '';
+      followChatLatest(true);
       addBubble('system', 'session reset');
     });
     messageInput.addEventListener('keydown', (event) => {
@@ -5900,6 +6265,7 @@ HTML_PAGE = r"""<!doctype html>
     window.initWorkbench();
     window.initDesktopIntegration();
     window.initMaximalistDashboard();
+    window.initDetailExplorer();
     window.initTaskDeck();
     window.initJarvisOperations();
     window.initMissionControl();
@@ -6144,7 +6510,7 @@ class LocalAIServerHandler(BaseHTTPRequestHandler):
       self._send_file(file_path)
       return
 
-    if path in {"/site/dashboard/dashboard.css", "/site/dashboard/dashboard.js", "/site/dashboard/workbench.js", "/site/dashboard/desktop.js", "/site/dashboard/maximalist.js", "/site/dashboard/operations.js", "/site/dashboard/sensory.js", "/site/dashboard/task_state.js", "/site/dashboard/taskdeck.js", "/site/dashboard/mission.js", "/site/dashboard/wake_voice.js", "/site/dashboard/spatial.js", "/site/dashboard/apple.js"}:
+    if path in {"/site/dashboard/dashboard.css", "/site/dashboard/dashboard.js", "/site/dashboard/chat_utilities.js", "/site/dashboard/workbench.js", "/site/dashboard/desktop.js", "/site/dashboard/maximalist.js", "/site/dashboard/details.js", "/site/dashboard/left_monitor.js", "/site/dashboard/left_monitor.css", "/site/dashboard/detail_sources.js", "/site/dashboard/operations.js", "/site/dashboard/sensory.js", "/site/dashboard/task_state.js", "/site/dashboard/taskdeck.js", "/site/dashboard/mission.js", "/site/dashboard/wake_voice.js", "/site/dashboard/spatial.js", "/site/dashboard/apple.js"}:
       self._send_file(os.path.join(os.path.dirname(__file__), "site", "dashboard", path.rsplit("/", 1)[-1]))
       return
 
@@ -6307,6 +6673,16 @@ class LocalAIServerHandler(BaseHTTPRequestHandler):
         self._send_json({'ok':False,'error':'通知設定を処理できませんでした。入力と補助アプリの登録を確認してください。'}, status=400)
       return
 
+    if path == '/chat/cancel':
+      data = self._read_json()
+      key = (str(data.get('session_id', '')), str(data.get('request_token', '')))
+      with _CHAT_CANCEL_LOCK:
+        finished = _CHAT_FINISHED.get(key)
+      stopped = _cancel_chat(*key)
+      ended = finished.wait(timeout=1.5) if stopped and finished is not None else False
+      self._send_json({'ok': True, 'cancellation_requested': stopped, 'worker_finished': ended})
+      return
+
     if path not in {"/chat", "/chat/assist", "/chat/stream", "/sessions/clear", "/documents", "/evaluation/feedback", "/processing/client"}:
       self._send_json({"ok": False, "error": "not found"}, status=404)
       return
@@ -6375,23 +6751,23 @@ class LocalAIServerHandler(BaseHTTPRequestHandler):
 
     if path == "/chat/stream":
       self._send_sse_headers()
-      for event in _stream_chat_payload(
-        message,
-        session_id,
-        current_location=current_location,
-        experiment_mode=experiment_mode,
-        test_case_id=test_case_id,
-        turbo_mode=turbo_mode,
-        reply_style=reply_style,
-      ):
-        self._send_sse_event(event["event"], event["data"])
+      try:
+        for event in _chat_activity_events(message, session_id,
+            request_token=str(data.get('request_token',''))[:128],
+            operation_id=str(data.get('operation_id',''))[:128], stream_body=reply_style=='standard',
+            current_location=current_location, experiment_mode=experiment_mode,
+            test_case_id=test_case_id, turbo_mode=turbo_mode, reply_style=reply_style):
+          self._send_sse_event(event['event'], event['data'])
+      except (BrokenPipeError, ConnectionResetError):
+        pass
       return
 
     if "text/event-stream" in self.headers.get("Accept", ""):
       self._send_sse_headers()
       try:
         for event in _chat_activity_events(message, session_id, current_location=current_location,
-                                         experiment_mode=experiment_mode, test_case_id=test_case_id, tool_request=tool_request, turbo_mode=turbo_mode, reply_style=reply_style):
+                                         experiment_mode=experiment_mode, test_case_id=test_case_id, tool_request=tool_request, turbo_mode=turbo_mode, reply_style=reply_style,
+                                         regenerate=bool(data.get('regenerate')), regenerate_from=str(data.get('regenerate_from', ''))[:30000], request_token=str(data.get('request_token', ''))[:128], operation_id=str(data.get('operation_id', ''))[:128]):
           self._send_sse_event(event["event"], event["data"])
       except (BrokenPipeError, ConnectionResetError):
         pass

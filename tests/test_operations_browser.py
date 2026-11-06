@@ -36,17 +36,17 @@ def browser_ui(tmp_path, monkeypatch):
 @pytest.mark.e2e
 def test_permanent_left_clean_composer_and_real_execution(browser_ui):
     page,base,errors=browser_ui
-    page.add_init_script("localStorage.setItem('jarvis-hud-hidden-v1',JSON.stringify(['hardware','cores','trends','capacity','processes']));")
+    page.add_init_script("localStorage.setItem('jarvis-hud-hidden-v1',JSON.stringify(['hardware','cores','network','capacity']));")
     assist=[]
     page.on('request',lambda request:assist.append(request.url) if '/chat/assist' in request.url else None)
     page.goto(base,wait_until='domcontentloaded')
     page.wait_for_selector('#ops-open')
     assert page.locator('#ai-assist-box').count()==0
     assert page.locator('.composer .quick-grid').count()==0
-    for key in ['hardware','cores','trends','capacity','processes']:
+    for key in ['hardware','cores','network','capacity']:
         module=page.locator(f'[data-hud-module="{key}"]')
         assert not module.evaluate('(e)=>e.hidden')
-        assert module.locator('.hud-module-head button').count()==0
+        assert module.locator('.hud-module-head button[aria-label$="を非表示"]').count()==0
     page.locator('[data-open-panel="system"]').click()
     assert page.locator('.hud-left-overview').is_visible()
     assert page.locator('#ai-core').is_visible()

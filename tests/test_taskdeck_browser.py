@@ -70,9 +70,9 @@ def test_monitor_rows_expand_and_pin_without_blocking_other_ui(app_url):
         assert first.evaluate('el => !el.classList.contains("is-expanded")')
         first.click()
         page.wait_for_timeout(100)
-        assert first.evaluate('el => el.classList.contains("is-expanded")')
+        assert page.locator('.dx-window').count()==1
         assert page.locator('#message').is_visible()
-        page.locator('#system-monitor-content .monitor-detail .monitor-pin').first.click()
+        page.locator('.dx-window').get_by_role('button',name='ピン留め',exact=True).click()
         assert first.evaluate('el => el.classList.contains("is-pinned")')
         assert not errors,errors
         browser.close()
@@ -85,7 +85,7 @@ def test_named_layout_restores_modules_panel_side_pin_and_mode(app_url):
         page=browser.new_page(viewport={'width':1440,'height':1000})
         errors=[];page.on('pageerror',lambda error:errors.append(str(error)))
         page.goto(app_url,wait_until='domcontentloaded');page.wait_for_selector('#task-layout-open')
-        page.locator('[data-hud-module="environment"] .hud-module-head button').click()
+        page.locator('[data-hud-module="environment"] .hud-module-head button[aria-label$="を非表示"]').click()
         page.locator('[data-open-panel="weather"]').click()
         weather=page.locator('[data-info-panel="weather"]');weather.locator('[data-pin]').click();weather.locator('button[aria-label="パネルを左右に移動"]').click()
         page.locator('#task-layout-open').click();page.locator('#task-layout-name').fill('研究用');page.locator('#task-layout-save').click()

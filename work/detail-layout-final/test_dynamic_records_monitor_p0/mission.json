@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "revision": 1,
+  "items": [
+    {
+      "id": "6e014cd43e814e6b8ab07f8330be61c5",
+      "kind": "task",
+      "title": "RAMを購入する",
+      "details": "予定の詳細メモ",
+      "due": "",
+      "priority": "high",
+      "done": false,
+      "created_at": "2026-10-31T21:50:45.027398+00:00"
+    }
+  ]
+}

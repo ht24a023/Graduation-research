@@ -46,8 +46,9 @@
     const mapForm=node('div',null,'tool-form'); mapForm.innerHTML='<label>出発地・目的地<input id="map-query" placeholder="大阪駅から京都駅まで電車で" /></label><button type="button" data-run="map">経路を検索</button><div id="map-result" class="tool-result"></div>';
     $('map-panel-content').prepend(mapForm);
     // 起動時に見えるのはAIコアと短い計測情報だけ。
-    const live=node('section',null,'panel live-timings'); live.innerHTML='<div class="panel-header"><strong>PROCESS / 実測</strong><span id="live-stage">待機中</span></div><div class="panel-body"><div id="live-elapsed">0.000 <small>秒</small></div><div id="live-stage-times"></div><div id="live-stage-trail" aria-live="polite"></div><p class="measurement-note">送信からの経過時間。詳しい記録は「性能」「処理履歴」へ。</p></div>';
+    const live=node('section',null,'panel live-timings'); live.innerHTML='<div class="panel-header"><strong>PROCESS / 実測</strong><button type="button" id="live-details-toggle" aria-expanded="false" aria-controls="live-process-details">詳細</button></div><div class="panel-body"><div id="live-elapsed">0.000 <small>秒</small></div><div id="live-process-details" hidden><div id="live-stage">待機中</div><div id="live-stage-times"></div><div id="live-stage-trail" aria-live="polite"></div><p class="measurement-note">送信からの経過時間。詳しい記録は「性能」「処理履歴」へ。</p></div></div>';
     document.querySelector('.ai-core-panel').after(live);
+    $('live-details-toggle').addEventListener('click',()=>{const box=$('live-process-details');box.hidden=!box.hidden;$('live-details-toggle').setAttribute('aria-expanded',String(!box.hidden));});
     const nav=document.querySelector('.dashboard-nav');
     for (const kind of ['document','system','youtube','history','performance','qr']) {
       const button=node('button',titles[kind]); button.type='button'; button.dataset.openPanel=kind; button.setAttribute('aria-expanded','false'); nav.insertBefore(button,$('close-all-panels'));
@@ -67,6 +68,7 @@
     if (card.event_id && knownCards.has(card.event_id)) return;
     if (card.event_id) knownCards.add(card.event_id);
     const kind=card.kind, data=card.data || {};
+    window.dispatchEvent(new CustomEvent('jarvis:tool-card',{detail:card}));
     if (kind==='mission'||kind==='knowledge') window.missionControl?.card(kind,data);
     else if (kind==='weather') { $('weather-summary').dataset.toolResult='true'; rawResult($('weather-summary'),data,card.success); }
     else if (kind==='map') rawResult($('map-result'),data,card.success);
@@ -271,6 +273,7 @@
       const record={request_id:active.request_id,session_id:active.session_id,message:active.message,created_at:Date.now()/1000,execution:active.execution,client_timings:active.client_timings,success:successful(data),route:data.route,start:active.start};
       records.set(record.request_id,record); conversationTiming(record); logTimings(record); renderHistory();
     },
+    cancel() { if(!active || active.completed)return;clearInterval(clock);drawLive();active.completed=true;pushStageTrail('ユーザー停止','stopped');$('live-stage').textContent='停止';window.dispatchEvent(new CustomEvent('jarvis:request-stopped')); },
     fail() { if(!active || active.completed)return; window.dispatchEvent(new CustomEvent('jarvis:request-failed')); clearInterval(clock); drawLive(); if (active) { active.completed=true; pushStageTrail('通信 / 実行エラー','error'); } $('live-stage').textContent='通信 / 実行エラー'; },
     recognition(event) { if (event==='start') recognitionStart=performance.now(); else if (event==='end' && recognitionStart!=null) recognitionResult={duration:(performance.now()-recognitionStart)/1000,text:$('message').value}; else if(event==='error') recognitionResult=null; },
     speech(event,id) {

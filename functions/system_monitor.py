@@ -15,6 +15,15 @@ except ImportError:
     psutil = None
 
 
+def _numeric_fields(record):
+    """Only numeric counters returned by psutil; no process arguments or environment."""
+    if record is None:
+        return None
+    values = record._asdict() if hasattr(record, '_asdict') else vars(record)
+    return {key: value for key, value in values.items()
+            if isinstance(value, (int, float)) and not isinstance(value, bool)}
+
+
 class SystemMonitor:
     def __init__(self):
         self._lock = threading.Lock()
@@ -32,6 +41,8 @@ class SystemMonitor:
         self._started = time.monotonic()
         self._processes_at = None
         self._top_memory = []
+        self._drives = []
+        self._drives_at = None
 
     @staticmethod
     def _counter_rate(current, previous, elapsed):
@@ -89,6 +100,32 @@ class SystemMonitor:
             self._gpus = []
         return self._gpus
 
+    def _drive_snapshot(self, now):
+        """Explorer's mounted volumes, from OS counters; no folder scan."""
+        if self._drives_at is not None and now - self._drives_at < 15:
+            return self._drives
+        rows, seen = [], set()
+        try:
+            partitions = psutil.disk_partitions(all=False)
+        except (OSError, psutil.Error):
+            partitions = []
+        for partition in partitions:
+            if partition.mountpoint in seen:
+                continue
+            seen.add(partition.mountpoint)
+            row = dict(device=partition.device, mountpoint=partition.mountpoint,
+                       filesystem=partition.fstype, options=partition.opts)
+            try:
+                usage = psutil.disk_usage(partition.mountpoint)
+                row.update(total_bytes=usage.total, used_bytes=usage.used,
+                           free_bytes=usage.free, usage_percent=usage.percent, available=True)
+            except (OSError, psutil.Error):
+                row.update(total_bytes=None, used_bytes=None, free_bytes=None,
+                           usage_percent=None, available=False)
+            rows.append(row)
+        self._drives, self._drives_at = rows, now
+        return rows
+
     def snapshot(self):
         if psutil is None:
             return {'ok': False, 'error': 'psutil が未インストールです', 'source': 'backend_pc'}
@@ -130,6 +167,10 @@ class SystemMonitor:
                     'os': platform.system(), 'os_release': platform.release(), 'architecture': platform.machine(),
                     'python': platform.python_version(), 'processor': platform.processor(),
                     'cpu_frequency_mhz': frequency.current if frequency else None,
+                    'cpu_frequency_detail_mhz': _numeric_fields(frequency),
+                    'network_adapters': [{'name': name, 'is_up': item.isup, 'speed_mbps': item.speed,
+                                          'mtu_bytes': item.mtu, 'duplex': getattr(item.duplex, 'name', str(item.duplex))}
+                                         for name, item in list(adapters.items())[:32]],
                     'active_adapters': sum(1 for item in adapters.values() if item.isup),
                     'reported_link_mbps': max((item.speed for item in adapters.values() if item.isup and item.speed>0),default=None),
                 }
@@ -140,12 +181,14 @@ class SystemMonitor:
                             'rss_bytes':optional(lambda:own_process.memory_info().rss) if own_process else None,
                             'system_process_count':len(process_ids) if process_ids is not None else None,
                             'server_uptime_sec': max(0, now-self._started),
+                            'cpu_time_seconds': _numeric_fields(optional(own_process.cpu_times)) if own_process else None,
                             'top_memory': self._process_snapshot(now)}
             swap = optional(psutil.swap_memory)
             memory = psutil.virtual_memory()
             disk = psutil.disk_usage(Path(__file__).resolve().anchor or os.sep)
             network = optional(psutil.net_io_counters)
             tx_rate = rx_rate = None
+            elapsed = None
             if self._network and network:
                 last_time, last_tx, last_rx = self._network
                 elapsed = now - last_time
@@ -172,13 +215,14 @@ class SystemMonitor:
             self._cached = {
                 'ok': True, 'source': 'backend_pc', 'hostname': platform.node(), 'sampled_at': time.time(),
                 'cpu': {'usage_percent': cpu_usage, 'physical_cores': psutil.cpu_count(logical=False),
-                        'logical_cores': psutil.cpu_count(), 'temperature_c': temperature, 'per_core_percent':core_usage},
+                        'logical_cores': psutil.cpu_count(), 'temperature_c': temperature, 'per_core_percent':core_usage, 'time_seconds':_numeric_fields(cpu_times), 'per_core_time_seconds':[_numeric_fields(core) for core in per_cpu]},
                 'memory': {'usage_percent': memory.percent, 'used_bytes': memory.total - memory.available,
-                           'total_bytes': memory.total, 'available_bytes': memory.available},
+                           'total_bytes': memory.total, 'available_bytes': memory.available, 'os_reported':_numeric_fields(memory)},
+                'storage': {'volumes': self._drive_snapshot(now), 'source': 'OS mounted volumes / Explorer PC', 'refresh_interval_sec': 15},
                 'disk': {'path': str(Path(__file__).resolve().anchor), 'usage_percent': disk.percent,
                          'used_bytes': disk.used, 'total_bytes': disk.total, 'free_bytes': disk.free},
                 'network': {'sent_bytes': network.bytes_sent if network else None, 'received_bytes': network.bytes_recv if network else None,
-                            'send_bytes_sec': tx_rate, 'receive_bytes_sec': rx_rate,
+                            'send_bytes_sec': tx_rate, 'receive_bytes_sec': rx_rate, 'sample_interval_sec': elapsed,
                             'errors_in': getattr(network, 'errin', None), 'errors_out': getattr(network, 'errout', None),
                             'drops_in': getattr(network, 'dropin', None), 'drops_out': getattr(network, 'dropout', None)},
                 'uptime_sec': max(0, time.time() - psutil.boot_time()),
@@ -188,7 +232,7 @@ class SystemMonitor:
                 'hardware': dict(self._hardware_sample), 'process': process_info,
                 'disk_io': {'read_bytes_sec':read_rate,'write_bytes_sec':write_rate,
                             'read_bytes': getattr(io_counts, 'read_bytes', None),
-                            'write_bytes': getattr(io_counts, 'write_bytes', None)},
+                            'write_bytes': getattr(io_counts, 'write_bytes', None), 'os_counters':_numeric_fields(io_counts)},
                 'swap': {'used_bytes':swap.used,'total_bytes':swap.total,'usage_percent':swap.percent} if swap else None,
             }
             self._sampled = time.monotonic()

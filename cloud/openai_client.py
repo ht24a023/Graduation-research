@@ -1,10 +1,11 @@
 """クラウドAIを使う時だけ接続を準備し、ローカル起動を妨げない。"""
 from functools import lru_cache
 
-from openai import OpenAI
+from openai import OpenAI, AsyncOpenAI
 
 from config import OPENAI_API_KEY
 from models.execution_trace import traced_stage
+from models.request_control import current_signal, run_cancellable
 
 
 @lru_cache(maxsize=1)
@@ -20,6 +21,15 @@ def ask_cloud_ai(text):
         raise RuntimeError(
             'クラウドAIのAPIキーが未設定です。.env の OPENAI_API_KEY を設定して再起動してください。'
         )
+
+    if current_signal() is not None:
+        async def request():
+            # Per-request client: cancellation never closes another chat's connection.
+            async with AsyncOpenAI(api_key=api_key, max_retries=0) as client:
+                response = await client.chat.completions.create(
+                    model='gpt-4.1-mini', messages=[{'role': 'user', 'content': text}])
+                return response.choices[0].message.content
+        return run_cancellable(request)
 
     response = _get_client(api_key).chat.completions.create(
         model='gpt-4.1-mini',

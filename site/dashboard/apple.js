@@ -48,6 +48,7 @@
  const dialog=el('dialog',null,'task-dialog');dialog.id='apple-delete-dialog';dialog.innerHTML='<div class="task-dialog-head"><strong>削除の確認</strong></div><div class="task-dialog-body"><p id="apple-delete-text"></p><div class="mc-actions"><button id="apple-delete-confirm" type="button">対象を削除する</button><button id="apple-delete-cancel" type="button">キャンセル</button></div></div>';document.body.append(dialog);
  };
  window.initAppleAgenda=()=>{
+  window.detailExplorer?.register('apple',ctx=>ctx.recordId?state.items.find(item=>item.id===ctx.recordId)||{status:'項目は更新・削除されています'}:state);
   for(const n of [2,3,4,6,7,8]){const option=el('option','優先度 '+n);option.value=String(n);$('apple-priority').append(option);}
   $('apple-form').addEventListener('submit',event=>{event.preventDefault();busy($('apple-save'),async()=>{const value=values();await api('mutate',{action:editing?'update':'create',id:editing?.id,revision:editing?.revision,source_id:$('apple-target').value,client_id:clientId,item:value,series_confirmed:$('apple-series-confirm').checked});$('apple-view-kind').value=value.kind;if(!editing&&value.kind==='event'){const d=value.all_day?new Date(value.start+'T12:00:00'):new Date(value.start);current=new Date(d.getFullYear(),d.getMonth(),1);selectedDay=day(d);}reset();await refresh();msg('保存しました。反映状態は各項目に表示しています。');});});
   $('apple-reset').addEventListener('click',reset);$('apple-kind').addEventListener('change',types);$('apple-all-day').addEventListener('change',types);

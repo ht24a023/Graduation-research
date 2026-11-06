@@ -221,6 +221,7 @@
     // 設定画面を開いたときに権限・接続状態だけを再確認する。
     $('open-workspace').addEventListener('click',refreshSettings);
   }
+  window.detailExplorer?.register('clock',()=>({backend_sample:clockSample,current_epoch_ms:clockNow(),sample_age_ms:clockSample?performance.now()-clockSample.at:null,mode,method:'PC時計のサンプル + ブラウザー単調時計'}));
   window.desktopIntegration={renderClock,setMode,getMode:()=>mode};
   window.initDesktopIntegration=()=>{
     installClock();installSettings();installModes();

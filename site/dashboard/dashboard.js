@@ -71,6 +71,15 @@
     const sessionControls = [$('session-id'), $('reset-btn'), $('turbo-mode')].filter(Boolean).map(element => ({ element, disabled: element.disabled }));
     sessionControls.forEach(({ element }) => { element.disabled = true; });
     const controller = new AbortController();
+    const requestToken = crypto.randomUUID();
+    payload.request_token = requestToken;
+    let userStopped = false;
+    const transport = {stop() {
+      if (controller.signal.aborted) return;
+      userStopped = true;controller.abort();
+      transport.cancelPromise = fetch('/chat/cancel', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({session_id:payload.session_id,request_token:requestToken}),signal:AbortSignal.timeout(3000)}).then(response=>response.json()).catch(()=>null);
+    }};
+    window.chatTransport = transport;
     const timer = setTimeout(() => controller.abort(), 240000);
     try {
       const response = await fetch('/chat', {
@@ -97,6 +106,7 @@
         }
         if (!lines.length) return;
         const data = JSON.parse(lines.join('\n'));
+        if (kind === 'delta' && typeof data.delta === 'string') window.dispatchEvent(new CustomEvent('jarvis:chat-delta',{detail:{delta:data.delta,session_id:payload.session_id,request_token:requestToken}}));
         if (kind === 'status' && data.state in labels) state(data.state);
         window.workbench?.event(kind, data);
         if (kind === 'done' || kind === 'error') result = data;
@@ -112,7 +122,7 @@
       }
       if (!result) throw new Error('サーバーから最終結果を受信できませんでした');
       return result;
-    } catch (error) { window.workbench?.fail(); if (error.name === 'AbortError') throw new Error('応答が4分以内に完了しませんでした。接続状態を確認して再送してください。'); throw error; } finally { clearTimeout(timer); sessionControls.forEach(({ element, disabled }) => { element.disabled = disabled; }); }
+    } catch (error) { if (userStopped) {const confirmation=await transport.cancelPromise;window.workbench?.cancel?.();const stopped = new Error('停止しました');stopped.name = 'ChatStopped';stopped.serverFinished=!!confirmation?.worker_finished;throw stopped;} window.workbench?.fail();if (error.name === 'AbortError') throw new Error('応答が4分以内に完了しませんでした。接続状態を確認して再送してください。'); throw error; } finally { if(window.chatTransport===transport)window.chatTransport=null;clearTimeout(timer); sessionControls.forEach(({ element, disabled }) => { element.disabled = disabled; }); }
   };
 
   function metric(label, value, note, percent) {
@@ -152,6 +162,7 @@
         pin.setAttribute('aria-pressed', String(monitorPinned.has(key)));
       });
       row.append(pin);
+      const detailFixed=window.detailExplorer?.isPinned?.(row)===true;row.classList.toggle('is-pinned',detailFixed);pin.setAttribute('aria-pressed',String(detailFixed));
       row.addEventListener('click', event => {
         if (event.target.closest('.monitor-pin')) return;
         const contentNode = row.closest('#system-monitor-content');
@@ -171,6 +182,7 @@
         }
       });
       row.addEventListener('keydown', event => {
+        if(event.target!==row)return;
         if (event.key === 'Enter' || event.key === ' ') {
           event.preventDefault(); row.click();
         }
@@ -194,6 +206,29 @@
       monitorAutoCollapseTimer = null;
     }
   }
+  function setupWorkDescription() {
+    const box = $('work-description');
+    const copyButton = $('copy-work-description');
+    const message = $('message');
+    if (!box || !message) return;
+    const key = 'jarvis-work-description-v1';
+    try {
+      const saved = localStorage.getItem(key);
+      if (saved) box.value = saved;
+    } catch {}
+    box.addEventListener('input', () => {
+      try { localStorage.setItem(key, box.value); } catch {}
+    });
+    copyButton?.addEventListener('click', () => {
+      const text = box.value.trim();
+      if (!text) return;
+      const current = message.value.trim();
+      message.value = current ? `${text}\n\n--- 作業説明 ---\n${current}` : text;
+      message.focus();
+      message.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+  }
+
   function detail(label, value, id, extraDetail = '') {
     const row = document.createElement('div'); row.className = 'monitor-detail';
     row.dataset.monitorKey = String(id || label).toLowerCase();
@@ -487,6 +522,7 @@
     // 最初の応答までにも処理時間の表示先を確保する。
     const content = $('system-monitor-content');
     content.append(detail('ローカル処理', '未計測', 'local-time-value'), detail('クラウドAPI', '未使用', 'cloud-time-value'));
+    setupWorkDescription();
     bindMonitorRows();
     setupPanels(); setupWorkspace(); setupVoice(); refreshMonitor();
   };
