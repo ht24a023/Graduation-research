@@ -6,6 +6,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import patch
 import pytest
+from openai import AsyncOpenAI as LoopbackAsyncOpenAI
 from cloud import local_llm, openai_client
 from models.request_control import RequestCancelled, request_scope
 import local_ai_server as server
@@ -38,7 +39,7 @@ def test_cancellation_closes_tcp_before_server_response(delayed_peer, kind):
     url, started, disconnected = delayed_peer
     signal, ended = threading.Event(), threading.Event()
     errors = []
-    real_async_client = openai_client.AsyncOpenAI
+    real_async_client = LoopbackAsyncOpenAI  # This test always sets base_url to its loopback peer.
     def invoke():
         try:
             with request_scope(signal):

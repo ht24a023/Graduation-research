@@ -261,7 +261,7 @@
     },
     complete(data) {
       if (!active || active.completed) return;
-      window.dispatchEvent(new CustomEvent('jarvis:request-finished',{detail:{ok:successful(data),route:data.route,elapsed:data.execution?.server_elapsed_sec,reply_style:data.reply_style}}));
+      window.dispatchEvent(new CustomEvent('jarvis:request-finished',{detail:{ok:successful(data),route:data.route,elapsed:data.execution?.server_elapsed_sec,reply_style:data.reply_style,session_id:data.session_id,background_memory:data.background_memory,routing_reason:data.routing_reason,memory_context:data.memory_context||[],cached:!!data.cache?.hit}}));
       active.completed=true; clearInterval(clock); drawLive(); $('live-stage').textContent=successful(data)?'完了':'失敗';
       pushStageTrail(successful(data)?'応答完了':'応答失敗', successful(data)?'done':'error');
       active.request_id=data.execution?.request_id || data.evaluation?.request_id;
@@ -301,7 +301,7 @@
     loadHistory();
     // 形状は固定した少数のDOM要素。フレームごとの粒子生成は行わない。
     const core=$('ai-core');
-    for (const className of ['core-ticks','core-segments','core-tilt','core-scan','core-particles']) core.append(node('div',null,className));
+    for (const className of ['core-ticks','core-segments','core-tilt','core-scan','core-particles','core-halo','core-wave']) core.append(node('div',null,className));
     document.addEventListener('visibilitychange',()=>core.classList.toggle('animation-paused',document.hidden));
   };
 })();

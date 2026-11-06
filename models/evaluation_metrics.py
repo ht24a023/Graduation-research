@@ -43,13 +43,17 @@ class EvaluationRecord:
     user_rating: str = ""
     quality_passed: bool = False
     notes: str = ""
+    cloud_used: bool | None = None
+    api_fee_status: str = "unknown"
+    cloud_provider: str = ""
+    cloud_model: str = ""
 
 
 class EvaluationMetrics:
     def __init__(self, log_path: str = "data/evaluation_log.jsonl") -> None:
         self.log_path = Path(log_path)
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
 
     @staticmethod
     def estimate_tokens(text: str) -> int:
@@ -81,7 +85,9 @@ class EvaluationMetrics:
                     if not line:
                         continue
                     try:
-                        records.append(json.loads(line))
+                        row = json.loads(line)
+                        if isinstance(row, dict):
+                            records.append(row)
                     except json.JSONDecodeError:
                         continue
         return records
@@ -108,22 +114,25 @@ class EvaluationMetrics:
             return False
 
         rating = (rating or "").strip()
+        if rating not in {"good", "partial", "bad"}:
+            return False
         quality_passed = rating in {"good", "partial"}
 
-        records = self._normalize_records(self.load_all())
-        updated = False
-        for record in records:
-            if str(record.get("request_id", "")).strip() != request_id:
-                continue
-            record["user_rating"] = rating
-            record["quality_passed"] = quality_passed
-            record["notes"] = (notes or "").strip()
-            updated = True
-            break
+        with self._lock:
+            records = self._normalize_records(self.load_all())
+            updated = False
+            for record in records:
+                if str(record.get("request_id", "")).strip() != request_id:
+                    continue
+                record["user_rating"] = rating
+                record["quality_passed"] = quality_passed
+                record["notes"] = (notes or "").strip()
+                updated = True
+                break
 
-        if updated:
-            self._write_all(records)
-        return updated
+            if updated:
+                self._write_all(records)
+            return updated
 
     def export_csv(self, output_path: str = "data/evaluation_log.csv") -> str:
         records = self._normalize_records(self.load_all())
@@ -289,6 +298,9 @@ class EvaluationMetrics:
         cloud_time_sec: float,
         api_called: bool,
         success: bool,
+        api_fee_status: str = "unknown",
+        cloud_provider: str = "",
+        cloud_model: str = "",
     ) -> EvaluationRecord:
         estimated_input_tokens = self.estimate_tokens(input_text)
         estimated_output_tokens = self.estimate_tokens(response_text)
@@ -299,7 +311,7 @@ class EvaluationMetrics:
         )
 
         actual_cost = 0.0
-        if api_called:
+        if api_called and api_fee_status != "free":
             actual_cost = self.estimate_cloud_cost(estimated_input_tokens, estimated_output_tokens)
 
         saved_cost = max(baseline_cost - actual_cost, 0.0)
@@ -322,6 +334,9 @@ class EvaluationMetrics:
             baseline_cost_yen=round(baseline_cost, 6),
             saved_cost_yen=round(saved_cost, 6),
             success=success,
+            cloud_used=api_called,
+            api_fee_status=api_fee_status if api_called else "none",
+            cloud_provider=cloud_provider, cloud_model=cloud_model,
         )
 
 
@@ -340,6 +355,10 @@ def build_user_facing_evaluation(record: EvaluationRecord, summary: dict[str, An
         "cloud_time_sec": record.cloud_time_sec,
         "api_called": record.api_called,
         "cloud_api_call": cloud_api_call,
+        "cloud_used": record.cloud_used if record.cloud_used is not None else record.api_called,
+        "api_fee_status": record.api_fee_status,
+        "cloud_provider": record.cloud_provider, "cloud_model": record.cloud_model,
+        "usage_assessment": ("クラウド利用あり／API利用料金なし（無料枠）" if record.api_fee_status=="free" else "クラウド利用あり／API利用料金あり（従量課金）" if record.api_fee_status=="paid" else "クラウド利用あり／API利用料金未確認" if record.api_called else "クラウド利用なし／API利用料金なし"),
         "estimated_api_reduction_count": 0 if record.api_called else 1,
         "input_tokens": record.input_tokens,
         "output_tokens": record.output_tokens,

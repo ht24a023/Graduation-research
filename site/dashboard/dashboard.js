@@ -249,13 +249,17 @@
   const speed = value => typeof value === 'number' ? value >= 1024 ** 2 ? `${(value / 1024 ** 2).toFixed(1)} MB/s` : `${(value / 1024).toFixed(1)} KB/s` : '計測中';
   let monitorTimer;
   let monitorDisposed = false;
+  let monitorHasData = false;
   async function refreshMonitor() {
     if (monitorDisposed) return;
     try {
       const response = await fetch('/system/metrics', { cache: 'no-store', signal: AbortSignal.timeout(7000) });
       const data = await response.json();
       if (monitorDisposed) return;
+      if(data.warming_up){$('monitor-status').textContent='計測準備中';return;}
       if (!response.ok || !data.ok) throw new Error(data.error || 'PC情報の取得に失敗しました');
+      if(data.telemetry?.stale)throw new Error('PC情報の更新が遅れています。表示値は前回取得分です。');
+      monitorHasData=true;
       window.dispatchEvent(new CustomEvent('jarvis:system-metrics',{detail:data}));
       const oldLocal = $('local-time-value')?.textContent || '未計測';
       const oldCloud = $('cloud-time-value')?.textContent || '未使用';
@@ -263,7 +267,8 @@
       content.append(
         metric('CPU', pct(data.cpu.usage_percent), `${data.cpu.physical_cores ?? '—'} コア / ${data.cpu.logical_cores ?? '—'} スレッド`, data.cpu.usage_percent),
         metric('RAM', pct(data.memory.usage_percent), `${gb(data.memory.used_bytes)} / ${gb(data.memory.total_bytes)}`, data.memory.usage_percent),
-        metric('DISK', pct(data.disk.usage_percent), `${data.disk.path} 空き ${gb(data.disk.free_bytes)} / ${gb(data.disk.total_bytes)}`, data.disk.usage_percent),
+        metric('DISK 容量', pct(data.disk.usage_percent), `${data.disk.path} 空き ${gb(data.disk.free_bytes)} / ${gb(data.disk.total_bytes)}`, data.disk.usage_percent),
+        detail('ディスク動作負荷', typeof data.disk.active_percent==='number'?pct(data.disk.active_percent):'未取得', 'disk-active', '容量使用率とは別の、物理ディスク全体の実測稼働率です。取得非対応の場合は未取得です。'),
         detail('通信速度', `↑ ${speed(data.network.send_bytes_sec)} / ↓ ${speed(data.network.receive_bytes_sec)}`, 'network-speed', `送信 ${speed(data.network.send_bytes_sec)} / 受信 ${speed(data.network.receive_bytes_sec)} · 合計 ${gb(data.network.sent_bytes)} / ${gb(data.network.received_bytes)}`),
         detail('累計送受信', `↑ ${gb(data.network.sent_bytes)} / ↓ ${gb(data.network.received_bytes)}`, 'network-total', `送信累計 ${gb(data.network.sent_bytes)} · 受信累計 ${gb(data.network.received_bytes)} · 実測は現在の回線負荷で表示`),
         detail('PC稼働時間', `${Math.floor(data.uptime_sec / 86400)}日 ${Math.floor(data.uptime_sec / 3600) % 24}時間 ${Math.floor(data.uptime_sec / 60) % 60}分`, 'uptime', `稼働時間 ${Math.floor(data.uptime_sec / 86400)}日 ${Math.floor(data.uptime_sec / 3600) % 24}時間 ${Math.floor(data.uptime_sec / 60) % 60}分 · バックエンドPC`),
@@ -282,7 +287,7 @@
         });
       } else content.append(detail('GPU / VRAM / 温度', '取得非対応', 'gpu-none', 'この PC では GPU の詳細情報が取得できません。'));
       const foot = document.createElement('p'); foot.className = 'monitor-footnote';
-      foot.textContent = `実測 · ${data.hostname}（バックエンドPC）\n2.5秒ごと更新 · 温度/GPUは対応機のみ`;
+      foot.textContent = `実測 · ${data.hostname}（バックエンドPC）\n約2秒ごと表示更新 · CPUはWindows性能カウンター優先 · プロセスCPUはPC全体を100% · 温度/GPUは対応機のみ`;
       content.append(foot);
       content.scrollTop = scrollPosition;
       bindMonitorRows();
@@ -291,13 +296,14 @@
       if (monitorDisposed) return;
       $('monitor-status').textContent = '取得停止'; $('monitor-status').classList.remove('live');
       const content = $('system-monitor-content');
+      if(monitorHasData){window.dispatchEvent(new CustomEvent('jarvis:telemetry-error',{detail:{error:error.message}}));return;}
       content.textContent = `現在のPC情報を取得できません。${error.message}`;
       // 応答時間の更新先は、モニター障害時にも残す。
       content.append(detail('ローカル処理', '未計測', 'local-time-value'), detail('クラウドAPI', '未使用', 'cloud-time-value'));
       bindMonitorRows();
     } finally {
       if (!monitorDisposed) {
-        const delay = document.hidden ? 15000 : 6000;
+        const delay = document.hidden ? 15000 : 2000;
         monitorTimer = setTimeout(refreshMonitor, delay);
       }
     }

@@ -1,0 +1,33 @@
+{
+  "samples": [
+    {
+      "request_ms": 0.093,
+      "ok": true,
+      "cpu_percent": null,
+      "cpu_source": "OS CPU time delta",
+      "memory_percent": 69.4,
+      "disk_activity_available": false,
+      "age_sec": 0.375
+    },
+    {
+      "request_ms": 0.104,
+      "ok": true,
+      "cpu_percent": 71.5,
+      "cpu_source": "OS CPU time delta",
+      "memory_percent": 65.8,
+      "disk_activity_available": false,
+      "age_sec": 0.266
+    },
+    {
+      "request_ms": 0.083,
+      "ok": true,
+      "cpu_percent": 56.0,
+      "cpu_source": "OS CPU time delta",
+      "memory_percent": 65.8,
+      "disk_activity_available": false,
+      "age_sec": 0.375
+    }
+  ],
+  "first_request_ms": 140.6,
+  "first_warming_up": true
+}

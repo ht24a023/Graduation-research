@@ -46,7 +46,7 @@ def test_nonstandard_stream_reports_same_metadata():
 
 def test_rejecting_cloud_still_blocks_generation_with_style():
     token='style-reject-probe'
-    server._set_pending_api_approval(token,{'session_id':'reject-style','prompt':style_prompt('private','detailed'),'message':'private','reply_style':'detailed'})
+    server._set_pending_api_approval(token,{'decision':'reject','session_id':'reject-style','prompt':style_prompt('private','detailed'),'message':'private','reply_style':'detailed'})
     with patch.object(server,'ask_cloud_ai') as cloud:
         result=server._build_chat_payload(server.API_REJECT_PREFIX+':'+token,'reject-style',reply_style='concise')
     assert result['ok']

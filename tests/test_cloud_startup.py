@@ -35,7 +35,7 @@ def test_cloud_initializes_on_demand_and_reuses_connection():
             factory.assert_not_called()
             assert openai_client.ask_cloud_ai('first') == 'answer'
             assert openai_client.ask_cloud_ai('second') == 'answer'
-            factory.assert_called_once_with(api_key='test-key')
+            factory.assert_called_once_with(api_key='test-key', timeout=60, max_retries=0)
             fake_client.chat.completions.create.assert_called_with(
                 model='gpt-4.1-mini', messages=[{'role': 'user', 'content': 'second'}],
             )

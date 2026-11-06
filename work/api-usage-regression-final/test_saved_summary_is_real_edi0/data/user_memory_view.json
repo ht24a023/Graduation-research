@@ -1,0 +1,28 @@
+{
+  "profile": {
+    "name": "",
+    "location": "",
+    "likes": [],
+    "dislikes": [],
+    "facts": [],
+    "updated_at": "2026-11-06T14:13:02"
+  },
+  "notes": [
+    {
+      "title": "作業要約 [7692c3ad3540]",
+      "content": "ユーザーが確認して修正した内容",
+      "type": "note",
+      "source": "cloud_work_summary",
+      "work_session_key": "7692c3ad3540",
+      "summary_revision": 1,
+      "user_edited": true,
+      "updated_at": "2026-11-06T14:13:02",
+      "summary_proposal": false
+    }
+  ],
+  "keep_requests": [],
+  "profile_updated_at": "2026-11-06T14:13:02",
+  "notes_updated_at": "2026-11-06T14:13:02",
+  "keep_requests_updated_at": "2026-11-06T14:13:02",
+  "synced_at": "2026-11-06T14:13:02"
+}

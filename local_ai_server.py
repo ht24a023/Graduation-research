@@ -1,8 +1,10 @@
-"""ブラウザからの入力を受け、専用機能・ローカルLLM・クラウドAIへ振り分けて応答するHTTPサーバーで、ローカル優先の対話UIを動かします。"""
+"""ブラウザからの入力を受け、専用機能・ローカルLLM・クラウドAIへ振り分けて応答するHTTPサーバーで、クラウド対話と専用ローカル処理のUIを動かします。"""
 
-# ブラウザからの入力を受け、専用機能・ローカルLLM・クラウドAIへ振り分けて応答を返すHTTPサーバーです。会話履歴、入力判定、文書管理、評価記録、画面表示を一体で制御し、ローカル優先の対話UIを動かします。
+# ブラウザからの入力を受け、専用機能・ローカルLLM・クラウドAIへ振り分けて応答を返すHTTPサーバーです。会話履歴、入力判定、文書管理、評価記録、画面表示を一体で制御し、クラウド対話と専用ローカル処理のUIを動かします。
 
 from __future__ import annotations  # 型注釈の評価を遅らせ、後で定義する型も参照できるようにする
+from models.api_usage import api_usage, usage_scope
+from cloud import model_catalog
 
 import json       # JSON形式のデータをPythonの値に変換し、その逆の変換も行う
 import mimetypes
@@ -30,6 +32,10 @@ from functions.location import get_location_details  # 現在地の詳細情報�
 from functions.time_func import get_time, get_weekday, get_weekday_from_text  # 現在時刻・今日の曜日・指定日の曜日を取得する
 from functions.transit import _extract_destination, resolve_navigation  # 目的地の抽出と経路案内を行う
 from models.intent_classifier import classify_intent  # 入力文から質問や依頼の種類を判定する
+from functions.work_memory import work_memory
+from functions.routing_policy import decide as routing_decision
+from models.memory_retrieval import retrieve as retrieve_memory, memory_revision
+from models.user_profile_memory import load_notes
 from models.user_profile_memory import (  # 利用者情報と保存文書を管理する関数を読み込む
     build_profile_context,  # AIへ渡す利用者情報をまとめる
     create_document_item,  # 文書を新規保存する
@@ -48,7 +54,8 @@ from models.user_profile_memory import (  # 利用者情報と保存文書を管
 
 
 from cloud.local_llm import ask_local_llm as _ask_local_llm, ask_local_llm_json, stream_local_llm  # ローカルLLMから通常回答・JSON回答・逐次生成の回答を取得する
-from cloud.local_prompt import build_local_prompt  # 質問や会話履歴、利用者情報からローカルLLMへの指示文を作る
+from cloud.local_prompt import build_local_prompt, build_cloud_prompt  # 質問や会話履歴、利用者情報からローカルLLMへの指示文を作る
+from cloud import openai_client as cloud_client
 from cloud.openai_client import ask_cloud_ai as _ask_cloud_ai  # クラウドAIへ指示文を送り、回答を取得する
 from functions.google_workspace import search_google_web, search_google_web_structured  # Google検索の結果を文章形式・構造化データ形式で取得する
 from functions.weather import get_weather, parse_weather_query  # 指定地域などの天気情報を取得する
@@ -210,6 +217,11 @@ def ask_local_llm(*args, **kwargs):
     return result
 
 
+def _cloud_answer(prompt, session_id, purpose, model_id=None):
+    with usage_scope(purpose, session_id=session_id), model_catalog.model_scope(model_id or model_catalog.selected(session_id)):
+        return ask_cloud_ai(prompt)
+
+
 def ask_cloud_ai(*args, **kwargs):
     _notify_activity("cloud")
     result = _ask_cloud_ai(*args, **kwargs)
@@ -266,6 +278,7 @@ def _chat_activity_events(message, session_id, request_token='', operation_id=''
                         _check_chat_cancelled()
                         if event['event'] in {'done', 'error'}:
                             event['data'].setdefault('ok', event['event']=='done')
+                            _offer_cloud_delegation(event['data'], message, session_id, kwargs.get('experiment_mode'), kwargs.get('reply_style', 'standard'))
                         publish(event)
                 else:
                     payload = _build_chat_payload(message, session_id, **kwargs)
@@ -315,8 +328,8 @@ DEFAULT_PORT = int(os.getenv("LOCAL_AI_SERVER_PORT", "8000"))
 MAX_HISTORY_TURNS = int(os.getenv("LOCAL_AI_SERVER_HISTORY", "12"))
 REQUEST_TIMEOUT = float(os.getenv("LOCAL_AI_SERVER_TIMEOUT", str(config.OLLAMA_TIMEOUT)))
 MAX_RETRIES = int(os.getenv("LOCAL_AI_SERVER_RETRIES", "2"))
-ROUTING_MODE_DEFAULT = os.getenv("ROUTING_MODE", "DYNAMIC_ROUTING").strip().upper()
-VALID_ROUTING_MODES = {"LOCAL_ONLY", "FIXED_ROUTING", "DYNAMIC_ROUTING"}
+ROUTING_MODE_DEFAULT = "CLOUD_FIRST"  # Normal conversations use cloud; legacy modes are explicit experiment overrides.
+VALID_ROUTING_MODES = {"CLOUD_FIRST", "LOCAL_ONLY", "FIXED_ROUTING", "DYNAMIC_ROUTING"}
 RETRY_SUFFIX = "\n\n追加指示: 回答は結論を先に、1〜2文で短く自然に答えてください。"
 
 # 画面から直接選べる代表的な操作テンプレート
@@ -401,7 +414,7 @@ ensure_memory_stores()
 _SESSION_LOCK = threading.RLock()
 _SESSION_HISTORY: dict[str, deque[dict[str, str]]] = {}
 _SESSION_LOCATION_CONTEXT: dict[str, dict[str, Any]] = {}
-_PENDING_API_APPROVAL: dict[str, dict[str, str]] = {}
+_PENDING_API_APPROVAL: dict[str, dict[str, Any]] = {}
 _SESSION_LOCATION_TTL_SECONDS = max(0, int(os.getenv("SESSION_LOCATION_TTL_SECONDS", "300")))
 _LOCATION_WEATHER_CACHE_TTL_SECONDS = max(60, int(os.getenv("LOCATION_WEATHER_CACHE_TTL_SECONDS", "1800")))
 _LOCATION_WEATHER_CACHE: dict[str, Any] = {
@@ -415,6 +428,7 @@ _RESPONSE_CACHE: dict[str, dict[str, Any]] = {}
 _RESPONSE_CACHE_ORDER: deque[str] = deque()
 
 API_APPROVE_PREFIX = "__API_APPROVE__"
+CLOUD_DELEGATE_PREFIX = "__CLOUD_DELEGATE__"
 API_REJECT_PREFIX = "__API_REJECT__"
 
 
@@ -562,6 +576,7 @@ def _get_cached_response(cache_key: str) -> dict[str, Any] | None:
       "response": str(cached.get("response") or ""),
       "ui": cached.get("ui"),
       "followups": cached.get("followups") if isinstance(cached.get("followups"), list) else None,
+      "memory_context": cached.get("memory_context", []),
       "age_sec": max(0.0, now - float(cached.get("cached_at") or now)),
     }
 
@@ -598,6 +613,7 @@ def _set_cached_response(cache_key: str, payload: dict[str, Any]) -> None:
       "response": response,
       "ui": payload.get("ui") if isinstance(payload.get("ui"), dict) else None,
       "followups": payload.get("followups") if isinstance(payload.get("followups"), list) else None,
+      "memory_context": payload.get("memory_context", []),
       "cached_at": now,
       "expires_at": now + _RESPONSE_CACHE_TTL_SECONDS,
     }
@@ -612,6 +628,11 @@ def _clear_session(session_id: str) -> bool:
   with _SESSION_LOCK:
     cleared_history = _SESSION_HISTORY.pop(session_id, None) is not None
     _SESSION_LOCATION_CONTEXT.pop(session_id, None)
+    _clear_pending_api_approval_for_session(session_id)
+    work_memory.cancel_session(session_id)
+    for key in list(_RESPONSE_CACHE):
+      if key.startswith(session_id.strip() + '|'):
+        _RESPONSE_CACHE.pop(key, None)
     return cleared_history
 
 
@@ -619,6 +640,10 @@ def _clear_all_sessions() -> None:
   with _SESSION_LOCK:
     _SESSION_HISTORY.clear()
     _SESSION_LOCATION_CONTEXT.clear()
+    _PENDING_API_APPROVAL.clear()
+    work_memory.cancel_all()
+    _RESPONSE_CACHE.clear()
+    _RESPONSE_CACHE_ORDER.clear()
 
 
 def _list_sessions() -> list[dict[str, Any]]:
@@ -963,7 +988,7 @@ def _should_probe_general_clarification(message: str) -> bool:
   return False
 
 
-def _detect_required_clarification(message: str, conversation_history: list[dict[str, str]], intent: str) -> dict[str, Any] | None:
+def _detect_required_clarification(message: str, conversation_history: list[dict[str, str]], intent: str, program_only: bool = False) -> dict[str, Any] | None:
   followup = _parse_clarification_followup(message)
   if followup:
     return None
@@ -981,6 +1006,9 @@ def _detect_required_clarification(message: str, conversation_history: list[dict
       "needs_clarification": True,
       "question": "目的地を1つ入力してください（例: 東京駅 / 京都駅）。",
     }
+
+  if program_only:
+    return None
 
   if any(keyword in message for keyword in _COMPARISON_KEYWORDS):
     comparison_targets = _extract_comparison_targets(message)
@@ -1027,6 +1055,15 @@ def _health_snapshot() -> dict[str, Any]:
     },
     "sessions": len(_list_sessions()),
   }
+
+  result['routing_mode']=_resolve_routing_mode(None)
+  default_choice=model_catalog.get(model_catalog.selected(''))
+  result['cloud']={'model':default_choice['model'],'provider':default_choice['provider'],'configured':bool(model_catalog.key(default_choice['provider'])),'connection':'unverified'}
+  if result['routing_mode']=='CLOUD_FIRST':
+    result['status']='configured_unverified' if result['cloud']['configured'] else 'configuration_required'
+    result['ollama']['checked']=False
+    result['latency_ms']=round((time.perf_counter()-started)*1000,1)
+    return result
 
   try:
     version = _ollama_json_get("/api/version", timeout=min(5.0, REQUEST_TIMEOUT))
@@ -1119,6 +1156,7 @@ def _server_meta() -> dict[str, Any]:
       "storage": "/storage",
       "capabilities": "/capabilities",
     },
+    "cloud": {"model":model_catalog.get(model_catalog.selected(''))['model'], "provider":model_catalog.get(model_catalog.selected(''))['provider'], "configured":bool(model_catalog.key(model_catalog.get(model_catalog.selected(''))['provider']))},
     "local_llm": {
       "model": config.OLLAMA_MODEL,
       "host": config.OLLAMA_HOST,
@@ -1437,7 +1475,8 @@ def _route_label(route: str) -> str:
     "local_function": "ローカル処理",
     "local_search": "ローカル処理",
     "local_llm": "ローカルLLM",
-    "cloud_fallback": "クラウドフォールバック",
+    "cloud_fallback": "クラウド委託",
+    "cloud_llm": "クラウドAI",
     "error": "エラー",
   }
   return mapping.get(route, route)
@@ -1555,6 +1594,12 @@ def _build_chat_assist_payload(message: str, session_id: str, current_location: 
   elif re.search(r"(オフライン|ローカルのみ|このPC|端末内)", normalized):
     route_hint = "local_function"
 
+  if _resolve_routing_mode(None) == 'CLOUD_FIRST':
+    decision=routing_decision(normalized,tool_request)
+    tool_request=decision.get('tool')
+    intent=decision['intent']
+    route_hint='cloud_llm' if intent=='chat' else 'local_function'
+
   confidence = 0.52
   if tool_request:
     confidence += 0.3
@@ -1574,7 +1619,7 @@ def _build_chat_assist_payload(message: str, session_id: str, current_location: 
   elif route_hint == "local_function":
     analysis = "ルールベースのローカル機能で高速処理できる可能性が高いです。"
   else:
-    analysis = "自由対話としてローカルLLMへ渡す想定です。"
+    analysis = "一般対話としてクラウドAIへ渡します。" if route_hint=="cloud_llm" else "自由対話としてローカルLLMへ渡す想定です。"
 
   return {
     "ok": True,
@@ -1595,9 +1640,9 @@ def _build_chat_assist_payload(message: str, session_id: str, current_location: 
 
 
 def _resolve_routing_mode(mode_override: str | None = None) -> str:
-  mode = (mode_override or ROUTING_MODE_DEFAULT or "DYNAMIC_ROUTING").strip().upper()
+  mode = (mode_override or ROUTING_MODE_DEFAULT or "CLOUD_FIRST").strip().upper()
   if mode not in VALID_ROUTING_MODES:
-    return "DYNAMIC_ROUTING"
+    return "CLOUD_FIRST"
   return mode
 
 
@@ -1613,15 +1658,20 @@ def _approval_token(command_text: str, prefix: str) -> str:
 
 def _has_pending_api_approval_for_session(session_id: str) -> bool:
   with _SESSION_LOCK:
-    return any((item.get("session_id") or "") == session_id for item in _PENDING_API_APPROVAL.values())
+    now = time.monotonic()
+    for token, item in list(_PENDING_API_APPROVAL.items()):
+      if now - item.get("created_at", 0) > API_APPROVAL_TTL_SECONDS:
+        _PENDING_API_APPROVAL.pop(token, None)
+    return any((item.get("session_id") or "") == session_id and item.get("kind") != "post_answer" for item in _PENDING_API_APPROVAL.values())
 
 
-def _clear_pending_api_approval_for_session(session_id: str) -> None:
+def _clear_pending_api_approval_for_session(session_id: str, preserve_post_answers: bool = False) -> None:
   with _SESSION_LOCK:
     stale_tokens = [
       token
       for token, item in _PENDING_API_APPROVAL.items()
       if (item.get("session_id") or "") == session_id
+      and not (preserve_post_answers and item.get("kind") == "post_answer")
     ]
     for token in stale_tokens:
       _PENDING_API_APPROVAL.pop(token, None)
@@ -1643,14 +1693,68 @@ def _prefer_local_llm_over_search(text: str) -> bool:
   return False
 
 
-def _set_pending_api_approval(token: str, payload: dict[str, str]) -> None:
-  with _SESSION_LOCK:
-    _PENDING_API_APPROVAL[token] = payload
+API_APPROVAL_TTL_SECONDS = 600
 
 
-def _pop_pending_api_approval(token: str) -> dict[str, str] | None:
+def _set_pending_api_approval(token: str, payload: dict[str, Any]) -> None:
   with _SESSION_LOCK:
-    return _PENDING_API_APPROVAL.pop(token, None)
+    _PENDING_API_APPROVAL[token] = {**payload, "created_at": time.monotonic()}
+
+
+def _pop_pending_api_approval(token: str, session_id: str, decision: str) -> dict[str, Any] | None:
+  """Atomically consume only the selected request, including its opposite button."""
+  with _SESSION_LOCK:
+    pending = _PENDING_API_APPROVAL.get(token)
+    if not pending or pending.get("session_id") != session_id:
+      return None
+    if time.monotonic() - pending.get("created_at", 0) > API_APPROVAL_TTL_SECONDS:
+      _PENDING_API_APPROVAL.pop(token, None)
+      return None
+    if pending.get("decision", "approve") != decision:
+      return None
+    group = pending.get("approval_group", token)
+    for key, item in list(_PENDING_API_APPROVAL.items()):
+      if item.get("session_id") == session_id and item.get("approval_group", key) == group:
+        _PENDING_API_APPROVAL.pop(key, None)
+    return pending
+
+
+def _offer_cloud_delegation(payload, message, session_id, experiment_mode=None, reply_style='standard'):
+  """Issue an answer-bound consent token; issuing it never makes a cloud call."""
+  if payload.get('cloud_delegation') or payload.get('cancelled'):
+    return payload
+  if _resolve_routing_mode(experiment_mode) == 'LOCAL_ONLY' or str(message).startswith('__'):
+    return payload
+  if payload.get('route') in {'cloud_fallback','cloud_llm'} or payload.get('evaluation', {}).get('api_called'):
+    return payload
+  question = str(message).strip()[:20000]
+  answer = str(payload.get('response') or payload.get('error') or '').strip()[:30000]
+  if not question or not answer:
+    return payload
+  token = uuid4().hex
+  prompt = style_prompt(
+    'あなたはローカルAIの回答を改善するアシスタントです。以下の質問と既存の回答を参考に、'
+    '必要な修正を行い、日本語で分かりやすい最終回答を生成してください。'
+    '既存の回答には誤りが含まれる可能性があります。外部ツールを実行したと主張しないでください。'
+    '情報不足の場合は推測で埋めず確認点を示してください。\n'
+    + '[元の質問]\n' + question + '\n[既存の回答またはエラー]\n' + answer,
+    normalize_style(reply_style))
+  with _SESSION_LOCK:
+    # Expire old offers and bound retained prompt size per session.
+    now = time.monotonic()
+    for key, item in list(_PENDING_API_APPROVAL.items()):
+      if now - item.get('created_at', 0) > API_APPROVAL_TTL_SECONDS:
+        _PENDING_API_APPROVAL.pop(key, None)
+    offers = [key for key, item in _PENDING_API_APPROVAL.items()
+              if item.get('session_id') == session_id and item.get('kind') == 'post_answer']
+    for key in offers[:-11]:
+      _PENDING_API_APPROVAL.pop(key, None)
+    _set_pending_api_approval(token, {'session_id': session_id, 'decision': 'approve',
+        'kind': 'post_answer', 'prompt': prompt, 'message': question, 'reply_style': reply_style})
+  payload['cloud_delegation'] = {'message': CLOUD_DELEGATE_PREFIX + ':' + token,
+      'expires_in_sec': API_APPROVAL_TTL_SECONDS,
+      'scope': 'この質問と表示中の回答（失敗時はエラー内容）を選択中のAIへ送信します（端末内Ollamaを選択した場合は端末内で処理します）。自動記憶がオンの場合は、回答後に直近のクラウド対話と既存の作業要約から別のAPI呼び出しで要約します。料金が発生する場合があります。'}
+  return payload
 
 
 def _build_google_then_api_prompt(message: str, search_result: str) -> str:
@@ -1810,6 +1914,8 @@ def _attach_evaluation(
   api_called: bool,
   success: bool,
 ) -> dict[str, Any]:
+  execution = model_catalog.outcome() if api_called else None
+  fee_status = ('free' if execution.get('free') else 'paid') if execution and (execution.get('free') or success) else 'unknown'
   record = evaluation_metrics.build_record(
     request_id=request_id,
     experiment_mode=experiment_mode,
@@ -1823,6 +1929,7 @@ def _attach_evaluation(
     cloud_time_sec=cloud_time_sec,
     api_called=api_called,
     success=success,
+    api_fee_status=fee_status, cloud_provider=(execution or {}).get("provider", ""), cloud_model=(execution or {}).get("model", ""),
   )
   evaluation_metrics.save(record)
   summary = evaluation_metrics.get_summary()
@@ -1846,6 +1953,8 @@ def _build_chat_payload(
   regenerate_from: str = "",
 ) -> dict[str, Any]:
   _check_chat_cancelled()
+  selected_model = model_catalog.selected(session_id)
+  model_catalog.clear_outcome()
   reply_style = normalize_style(reply_style)
   message = (message or "").strip()
   current_location = (current_location or "").strip()
@@ -1861,7 +1970,7 @@ def _build_chat_payload(
   )
   llm_message = _build_clarification_followup_prompt(*clarification_followup) if clarification_followup else message
 
-  approve_token = _approval_token(message, API_APPROVE_PREFIX)
+  approve_token = _approval_token(message, API_APPROVE_PREFIX) or _approval_token(message, CLOUD_DELEGATE_PREFIX)
   reject_token = _approval_token(message, API_REJECT_PREFIX)
 
   request_id = uuid4().hex
@@ -1872,6 +1981,7 @@ def _build_chat_payload(
   local_time_sec = 0.0
   cloud_time_sec = 0.0
   api_called = False
+  memory_context = []
 
   cache_key = _build_response_cache_key(
     session_id=session_id,
@@ -1880,9 +1990,12 @@ def _build_chat_payload(
     experiment_mode=experiment_mode,
     turbo_mode=turbo_mode,
   )
-  cache_key += "|reply-style=" + reply_style
+  cache_key += "|reply-style=" + reply_style + "|memory=" + memory_revision() + "|model=" + selected_model
   requested_tool = tool_request or run_stage('intent', _parse_dashboard_request, effective_message)
   # Live/tool results must be obtained again, including their result cards.
+  policy = ({'intent':'tool','tool':tool_request,'reason':'パネルで選択された専用機能を実行'} if tool_request else routing_decision(effective_message, requested_tool)) if experiment_mode == 'CLOUD_FIRST' else None
+  if policy is not None and not tool_request:
+    requested_tool = policy.get('tool')
   cacheable_request = not regenerate and _is_cacheable_message(effective_message) and not clarification_followup and not requested_tool
 
   def finalize(
@@ -1895,7 +2008,15 @@ def _build_chat_payload(
     fallback_used: bool = False,
     extra: dict[str, Any] | None = None,
   ) -> dict[str, Any]:
+    nonlocal api_called, cloud_time_sec, local_time_sec
     _check_chat_cancelled()
+    execution = model_catalog.outcome()
+    if api_called and execution and execution.get('cloud_attempted') is False:
+      api_called=False
+    if api_called and execution and execution.get('local'):
+      api_called=False
+      local_time_sec+=cloud_time_sec;cloud_time_sec=0
+      if route in ('cloud_llm','cloud_fallback'):route='local_llm'
     response_text = (response or "").strip() if ok else (error or "").strip()
     payload: dict[str, Any] = {
       "ok": ok,
@@ -1907,7 +2028,14 @@ def _build_chat_payload(
       "route": route,
       "performance_mode": "turbo" if turbo_mode else "balanced",
       "reply_style": reply_style,
+      "model_choice": selected_model,
+      "routing_reason": policy["reason"] if policy else "選択された実験モードで処理",
     }
+    if execution:
+      payload['cloud_execution']=execution
+      if execution.get('switch_required'):payload['model_switch_required']=True
+    if memory_context:
+      payload["memory_context"] = memory_context
     if ok:
       payload["response"] = response_text
       if extra and isinstance(extra.get("followups"), list):
@@ -1926,9 +2054,11 @@ def _build_chat_payload(
       if ui_type != "cloud_api_consent":
         _set_cached_response(cache_key, payload)
 
+    if not api_called:
+      _offer_cloud_delegation(payload, message, session_id, experiment_mode, reply_style)
     mark_text_ready()
     elapsed = time.perf_counter() - started
-    return _attach_evaluation(
+    evaluated = _attach_evaluation(
       base_payload=payload,
       request_id=request_id,
       experiment_mode=experiment_mode,
@@ -1943,25 +2073,43 @@ def _build_chat_payload(
       success=ok,
     )
 
+    if ok and api_called:
+      try:
+        evaluated['background_memory']=work_memory.enqueue(session_id,str(payload.get('source_question') or message),response_text, model_id=selected_model)
+      except Exception:
+        evaluated['background_memory']={'state':'error','extra_cloud_request':False}
+    return evaluated
+
   if regenerate:
     # Regenerate wording from the selected answer, without repeating its tools/actions.
-    prompt = build_local_prompt(
+    prompt_builder = build_cloud_prompt if experiment_mode=='CLOUD_FIRST' else build_local_prompt
+    prompt = prompt_builder(
       '次の質問への回答を再生成してください。既存の回答に含まれる取得済み情報を使い、'
       '外部操作や情報の再取得を実行したとは述べないでください。\n'
       + '質問：' + message + '\n既存の回答：' + str(regenerate_from)[:30000],
       conversation_history=[], user_profile_context='')
     local_started = time.perf_counter()
-    response = ask_local_llm(style_prompt(prompt, reply_style), timeout=REQUEST_TIMEOUT)
-    local_time_sec += time.perf_counter() - local_started
+    if experiment_mode == 'CLOUD_FIRST':
+      cloud_started=time.perf_counter();api_called=True
+      try:
+        response=_cloud_answer(style_prompt(prompt, reply_style), session_id, 'regeneration', selected_model)
+        cloud_time_sec+=time.perf_counter()-cloud_started
+      except Exception as error:
+        cloud_time_sec+=time.perf_counter()-cloud_started
+        return finalize(ok=False,route='error',error=f'クラウド回答を生成できませんでした: {error}')
+    else:
+      response = ask_local_llm(style_prompt(prompt, reply_style), timeout=REQUEST_TIMEOUT)
+      local_time_sec += time.perf_counter() - local_started
     if _looks_like_llm_error(response):
       return finalize(ok=False, route='error', error=response)
     _append_turn(session_id, 'user', message)
     _append_turn(session_id, 'assistant', response)
-    return finalize(ok=True, route='local_llm', response=response, extra={'regenerated': True})
+    return finalize(ok=True, route='cloud_llm' if experiment_mode=='CLOUD_FIRST' else 'local_llm', response=response, extra={'regenerated': True})
 
   if not tool_request and not approve_token and not reject_token and cacheable_request:
     cached = _get_cached_response(cache_key)
     if cached and cached.get("response"):
+      memory_context = cached.get("memory_context", [])
       update_profile_from_text(effective_message)
       _append_turn(session_id, "user", message)
       _append_turn(session_id, "assistant", str(cached.get("response") or ""))
@@ -1991,38 +2139,41 @@ def _build_chat_payload(
       return finalize(ok=False, route='error', error=f'ツールを実行できませんでした: {error}')
 
   if approve_token:
-    pending = _pop_pending_api_approval(approve_token)
+    if experiment_mode == "LOCAL_ONLY":
+      return finalize(ok=False, route="error", error="LOCAL_ONLYモードではクラウドAPIを呼び出しません。")
+    pending = _pop_pending_api_approval(approve_token, session_id, "approve")
     if not pending or pending.get("session_id") != session_id:
-      return finalize(ok=False, route="error", error="承認待ちのAPI呼び出しが見つかりませんでした。")
+      return finalize(ok=False, route="error", error="承認が期限切れ・使用済み、または別の会話のため実行できません。元の質問をもう一度送信してください。")
 
+    memory_context = pending.get("memory_context", [])
     cloud_started = time.perf_counter()
     try:
       reply_style = normalize_style(pending.get("reply_style", "standard"))
-      cloud_response = ask_cloud_ai(str(pending.get("prompt", "")))
+      cloud_response = _cloud_answer(str(pending.get("prompt", "")), session_id, 'delegation', selected_model)
       cloud_time_sec += time.perf_counter() - cloud_started
       api_called = True
       _append_turn(session_id, "assistant", cloud_response)
-      return finalize(ok=True, route="cloud_fallback", response=cloud_response)
+      return finalize(ok=True, route="cloud_fallback", response=cloud_response, extra={"source_question":pending.get("message", "")})
     except Exception as error:
       cloud_time_sec += time.perf_counter() - cloud_started
       api_called = True
       return finalize(ok=False, route="error", error=f"（クラウド呼び出し失敗: {error}）")
 
-  if message.startswith(API_APPROVE_PREFIX) and not approve_token:
+  if (message.startswith(API_APPROVE_PREFIX) or message.startswith(CLOUD_DELEGATE_PREFIX)) and not approve_token:
     return finalize(ok=False, route="error", error="承認コマンド形式が不正です。承認ボタンから送信してください。")
 
   if reject_token:
-    pending = _pop_pending_api_approval(reject_token)
+    pending = _pop_pending_api_approval(reject_token, session_id, "reject")
     if not pending or pending.get("session_id") != session_id:
-      return finalize(ok=False, route="error", error="承認待ちのAPI呼び出しが見つかりませんでした。")
+      return finalize(ok=False, route="error", error="承認が期限切れ・使用済み、または別の会話のため実行できません。元の質問をもう一度送信してください。")
 
     response_text = "承知しました。今回はクラウドAPIを使わず、Google検索結果のみで終了します。"
-    _clear_pending_api_approval_for_session(session_id)
+    _clear_pending_api_approval_for_session(session_id, preserve_post_answers=True)
     _append_turn(session_id, "assistant", response_text)
     return finalize(ok=True, route="local_search", response=response_text)
 
   if "今回はローカル結果でOK" in message and _has_pending_api_approval_for_session(session_id):
-    _clear_pending_api_approval_for_session(session_id)
+    _clear_pending_api_approval_for_session(session_id, preserve_post_answers=True)
     response_text = "承知しました。今回はクラウドAPIを使わず、Google検索結果のみで終了します。"
     _append_turn(session_id, "assistant", response_text)
     return finalize(ok=True, route="local_search", response=response_text)
@@ -2034,7 +2185,8 @@ def _build_chat_payload(
 
   _append_turn(session_id, "user", message)
   history = _snapshot_session(session_id)
-  profile_context = build_profile_context()
+  selected_memory = retrieve_memory(effective_message, load_notes().get("notes", []))
+  profile_context = build_profile_context(query=effective_message, selected_notes=selected_memory)
 
   if _looks_like_capability_question(effective_message):
     local_started = time.perf_counter()
@@ -2049,7 +2201,7 @@ def _build_chat_payload(
       extra={"ui": capability_payload["ui"]},
     )
 
-  if _looks_like_greeting(effective_message):
+  if (policy is None and _looks_like_greeting(effective_message)) or (policy is not None and policy["intent"]=="greeting"):
     response_text = "こんにちは。ローカルで応答しています。"
     _append_turn(session_id, "assistant", response_text)
     return finalize(ok=True, route="local_function", response=response_text)
@@ -2073,11 +2225,11 @@ def _build_chat_payload(
       response_payload["ui"] = explicit_note_payload["ui"]
     return finalize(ok=True, route="local_function", response=explicit_note_response, extra=response_payload)
 
-  intent = run_stage('intent', classify_intent, effective_message)
+  intent = policy['intent'] if policy is not None else run_stage('intent', classify_intent, effective_message)
   prefer_local_llm = _prefer_local_llm_over_search(effective_message)
   clarification_decision = None
-  if not clarification_followup and experiment_mode != "FIXED_ROUTING":
-    clarification_decision = run_stage('intent', _detect_required_clarification, effective_message, history, intent)
+  if not clarification_followup and experiment_mode != "FIXED_ROUTING" and (policy is None or intent in {"calculate","navigation"}):
+    clarification_decision = run_stage('intent', _detect_required_clarification, effective_message, history, intent, **({'program_only':True} if policy is not None else {}))
 
   if clarification_decision and clarification_decision.get("needs_clarification"):
     question = str(clarification_decision.get("question") or "").strip()
@@ -2092,7 +2244,7 @@ def _build_chat_payload(
       extra={"ui": clarification_ui},
     )
 
-  if intent == "relative_weekday" or _looks_like_relative_weekday_question(message):
+  if intent == "relative_weekday" or (policy is None and _looks_like_relative_weekday_question(message)):
     local_started = time.perf_counter()
     response = run_stage('tool', get_weekday_from_text, effective_message)
     local_time_sec += time.perf_counter() - local_started
@@ -2113,7 +2265,7 @@ def _build_chat_payload(
     _append_turn(session_id, "assistant", response)
     return finalize(ok=True, route="local_function", response=response)
 
-  if intent == "calculate" or _looks_like_calculation(effective_message):
+  if intent == "calculate" or (policy is None and _looks_like_calculation(effective_message)):
     calc_input = clarification_followup[1] if clarification_followup else recompute_message
     local_started = time.perf_counter()
     response = run_stage('tool', calculate, calc_input)
@@ -2187,7 +2339,7 @@ def _build_chat_payload(
     print("route=search_failed")
     return finalize(ok=True, route="search_failed", response=search_failure, extra={"ui": _build_search_failure_ui(), "error_type": error_type})
 
-  if _looks_like_fact_question(effective_message) and not prefer_local_llm:
+  if policy is None and _looks_like_fact_question(effective_message) and not prefer_local_llm:
     local_started = time.perf_counter()
     search_payload, fallback_search_result = _run_search_with_fallback(recompute_message)
     local_time_sec += time.perf_counter() - local_started
@@ -2214,7 +2366,9 @@ def _build_chat_payload(
   history_for_prompt = [] if clarification_followup else history
   if turbo_mode and len(history_for_prompt) > 4:
     history_for_prompt = history_for_prompt[-4:]
-  prompt = build_local_prompt(
+  memory_context = [{key: note[key] for key in ("id", "title", "matched_terms", "truncated")} for note in selected_memory]
+  prompt_builder = build_cloud_prompt if experiment_mode=='CLOUD_FIRST' else build_local_prompt
+  prompt = prompt_builder(
     llm_message,
     conversation_history=history_for_prompt,
     user_profile_context=profile_context,
@@ -2222,24 +2376,24 @@ def _build_chat_payload(
 
   prompt = style_prompt(prompt, reply_style)
 
-  if experiment_mode == "FIXED_ROUTING":
+  if experiment_mode in {"FIXED_ROUTING", "CLOUD_FIRST"}:
     cloud_started = time.perf_counter()
     try:
-      cloud_response = ask_cloud_ai(prompt)
+      cloud_response = _cloud_answer(prompt, session_id, 'conversation', selected_model)
       cloud_time_sec += time.perf_counter() - cloud_started
       api_called = True
       _append_turn(session_id, "assistant", cloud_response)
       clarification_ui = None if clarification_followup else _build_clarification_ui(effective_message, cloud_response)
       return finalize(
         ok=True,
-        route="cloud_fallback",
+        route="cloud_llm" if experiment_mode=="CLOUD_FIRST" else "cloud_fallback",
         response=cloud_response,
         extra={"ui": clarification_ui} if clarification_ui else None,
       )
     except Exception as error:
       cloud_time_sec += time.perf_counter() - cloud_started
       api_called = True
-      return finalize(ok=False, route="error", error=f"（FIXED_ROUTINGのクラウド呼び出し失敗: {error}）")
+      return finalize(ok=False, route="error", error=f"（クラウド回答を生成できませんでした: {error}）")
 
   local_started = time.perf_counter()
   result = _generate_llm_response(prompt, retry_count_override=1 if turbo_mode else None)
@@ -2298,12 +2452,17 @@ def _build_chat_payload(
     _append_turn(session_id, "assistant", response_text)
     return finalize(ok=True, route="search_failed", response=response_text, fallback_used=True, extra={"error_type": search_payload.get("error_type") or "search_fetch_failed", "cache": {"turbo": True}})
   if search_payload.get("ok") or (fallback_search_result and fallback_search_result not in _SEARCH_FALLBACK_BLOCKLIST):
+    _clear_pending_api_approval_for_session(session_id, preserve_post_answers=True)
     approval_token = uuid4().hex
     reject_token = uuid4().hex
+    approval_group = uuid4().hex
     _set_pending_api_approval(
       approval_token,
       {
         "session_id": session_id,
+        "decision": "approve",
+        "approval_group": approval_group,
+        "memory_context": memory_context,
         "prompt": prompt,
         "reply_style": reply_style,
         "message": message,
@@ -2313,6 +2472,9 @@ def _build_chat_payload(
       reject_token,
       {
         "session_id": session_id,
+        "decision": "reject",
+        "approval_group": approval_group,
+        "memory_context": memory_context,
         "prompt": prompt,
         "reply_style": reply_style,
         "message": message,
@@ -2330,7 +2492,7 @@ def _build_chat_payload(
         "ui": {
           "type": "cloud_api_consent",
           "title": "クラウドAPIを使って詳細回答を生成しますか？",
-          "description": "料金が発生する可能性があります。実行する場合のみ選択してください。",
+          "description": "この質問・会話履歴・選択された保存情報をクラウドAIへ送信します。料金が発生する可能性があります。承認はこの回答の一回限り・10分間有効です。",
           "interaction": "send",
           "options": [
             {
@@ -2408,7 +2570,7 @@ def _stream_chat_payload(
     evaluation_metrics.save(record)
     return build_user_facing_evaluation(record, evaluation_metrics.get_summary())
 
-  if resolved_mode in {"LOCAL_ONLY", "FIXED_ROUTING"}:
+  if resolved_mode in {"CLOUD_FIRST", "LOCAL_ONLY", "FIXED_ROUTING"}:
     payload = _build_chat_payload(
       message,
       session_id,
@@ -2425,6 +2587,7 @@ def _stream_chat_payload(
 
   if (
     message.startswith(API_APPROVE_PREFIX)
+    or message.startswith(CLOUD_DELEGATE_PREFIX)
     or message.startswith(API_REJECT_PREFIX)
     or ("今回はローカル結果でOK" in message and _has_pending_api_approval_for_session(session_id))
   ):
@@ -2480,7 +2643,8 @@ def _stream_chat_payload(
 
   _append_turn(session_id, "user", message)
   history = _snapshot_session(session_id)
-  profile_context = build_profile_context()
+  selected_memory = retrieve_memory(effective_message, load_notes().get("notes", []))
+  profile_context = build_profile_context(query=effective_message, selected_notes=selected_memory)
 
   if _looks_like_capability_question(message):
     local_started = time.perf_counter()
@@ -2586,6 +2750,7 @@ def _stream_chat_payload(
         "experiment_mode": resolved_mode,
         "test_case_id": test_case_id,
         "evaluation": finalize_payload("local_llm", response_text, True),
+        "memory_context": [{key: note[key] for key in ("id", "title", "matched_terms", "truncated")} for note in selected_memory],
       },
     }
 
@@ -3766,7 +3931,7 @@ HTML_PAGE = r"""<!doctype html>
 <body>
   <div class="shell jarvis-shell">
     <header class="dashboard-header">
-      <div class="dashboard-brand">AI<small>LOCAL / SYSTEM INTERFACE</small></div>
+      <div class="dashboard-brand">AI<small>CLOUD CHAT / LOCAL TOOLS</small></div>
       <nav class="dashboard-nav" aria-label="情報パネル">
         <button type="button" data-open-panel="weather" aria-expanded="false">天気</button>
         <button type="button" data-open-panel="map" aria-expanded="false">地図</button>
@@ -3866,7 +4031,14 @@ HTML_PAGE = r"""<!doctype html>
         <section class="panel ai-core-panel">
           <div class="panel-header"><strong>AI CORE</strong><span class="core-mode">LIVE STATE</span></div>
           <div id="ai-core" data-state="idle" role="img" aria-label="AIの状態: 待機中">
-            <div class="core-orbit"></div><div class="core-inner"></div><div class="core-center">AI</div>
+            <div class="core-ticks"></div>
+            <div class="core-segments"></div>
+            <div class="core-tilt"></div>
+            <div class="core-scan"></div>
+            <div class="core-particles"></div>
+            <div class="core-orbit"></div>
+            <div class="core-inner"></div>
+            <div class="core-center">AI</div>
           </div>
           <div id="core-state-label" role="status" aria-live="polite">待機中</div>
           <p class="core-caption" id="core-caption">ローカルアシスタント</p>
@@ -3886,6 +4058,10 @@ HTML_PAGE = r"""<!doctype html>
               <input id="browser-search" type="text" placeholder="Web検索またはURLを入力…" aria-label="ブラウザ検索" />
               <button id="browser-search-btn" type="button">検索</button>
               <button id="browser-close-btn" class="secondary" type="button">閉じる</button>
+            </div>
+            <div class="browser-history" id="browser-history" aria-live="polite">
+              <div class="browser-history-title">検索履歴</div>
+              <div class="browser-history-empty">まだ検索していません。</div>
             </div>
             <div class="browser-preview" aria-live="polite">
               <div class="browser-placeholder">ブラウザを開くには「検索」を押してください。<br>ここで参照しながら、そのままチャットを続けられます。</div>
@@ -3907,7 +4083,7 @@ HTML_PAGE = r"""<!doctype html>
             <div class="row">
               <input id="session-id" placeholder="session id" />
               <input id="current-location" placeholder="現在地（任意）" />
-              <label class="turbo-toggle" title="低遅延優先。クラウドフォールバックを抑制します。"><input id="turbo-mode" type="checkbox" /> Turbo</label>
+              <label class="turbo-toggle" title="会話はクラウドが標準です。Turboは入力履歴を短くし、実験モードではローカル再試行を抑制します。"><input id="turbo-mode" type="checkbox" /> Turbo</label>
               <button id="send-btn" type="button">送信</button><button id="chat-stop" type="button" hidden>停止</button>
               <button id="reset-btn" class="secondary" type="button">新しい会話</button>
             </div>
@@ -4009,6 +4185,7 @@ HTML_PAGE = r"""<!doctype html>
   <script src="/site/maps/topojson-client.min.js"></script>
   <script src="/site/dashboard/dashboard.js"></script>
   <script src="/site/dashboard/chat_utilities.js"></script>
+  <script src="/site/dashboard/chat_browser.js"></script>
   <script src="/site/dashboard/workbench.js"></script>
   <script src="/site/dashboard/desktop.js"></script>
   <script src="/site/dashboard/maximalist.js"></script>
@@ -4024,6 +4201,15 @@ HTML_PAGE = r"""<!doctype html>
   <script src="/site/dashboard/apple.js"></script>
   <script src="/site/dashboard/wake_voice.js"></script>
   <script src="/site/dashboard/spatial.js"></script>
+  <link rel="stylesheet" href="/site/dashboard/neural_core.css" />
+  <script src="/site/dashboard/neural_core.js"></script>
+  <script src="/site/dashboard/work_memory_ui.js"></script>
+  <link rel="stylesheet" href="/site/dashboard/research.css" />
+  <script src="/site/dashboard/research.js"></script>
+  <link rel="stylesheet" href="/site/dashboard/api_usage.css">
+  <script src="/site/dashboard/api_usage.js"></script>
+  <link rel="stylesheet" href="/site/dashboard/model_picker.css">
+  <script src="/site/dashboard/model_picker.js"></script>
   <script>
     const chatLog = document.getElementById('chat-log');
     // 中央chat担当: keep the reader's position until they choose to follow again.
@@ -4246,18 +4432,51 @@ HTML_PAGE = r"""<!doctype html>
       turboModeInput.checked = savedTurboMode;
     }
     const savedGeoMode = safeStorageGet(geoPanelModeKey) || 'ip';
-    const savedManualRegion = safeStorageGet(geoManualRegionKey) || '';
-    geoState.mode = ['device', 'ip', 'manual'].includes(savedGeoMode) ? savedGeoMode : 'ip';
+    const savedManualRegion = safeStorageGet(geoManualRegionKey) || safeStorageGet(locationStorageKey) || '';
     geoState.manual = savedManualRegion;
+    geoState.mode = savedManualRegion ? 'manual' : (['device', 'ip', 'manual'].includes(savedGeoMode) ? savedGeoMode : 'ip');
     if (geoSourceSelect) {
       geoSourceSelect.value = geoState.mode;
     }
     if (geoManualInput) {
       geoManualInput.value = geoState.manual;
     }
+    if (locationInput && !locationInput.value) {
+      locationInput.value = savedManualRegion;
+    }
 
     function persistCurrentLocation(value) {
-      safeStorageSet(locationStorageKey, value || '');
+      const normalized = String(value || '').trim();
+      safeStorageSet(locationStorageKey, normalized);
+      if (locationInput && locationInput.value !== normalized) {
+        locationInput.value = normalized;
+      }
+      if (geoManualInput && geoManualInput.value !== normalized) {
+        geoManualInput.value = normalized;
+      }
+    }
+
+    function syncCurrentLocation(value, source = 'chat') {
+      const normalized = String(value || '').trim();
+      if (source !== 'chat' && locationInput) {
+        locationInput.value = normalized;
+      }
+      if (source !== 'geo' && geoManualInput) {
+        geoManualInput.value = normalized;
+      }
+      persistCurrentLocation(normalized);
+      persistManualRegion(normalized);
+      geoState.manual = normalized;
+      if (normalized) {
+        geoState.mode = 'manual';
+        geoState.manualLock = true;
+        persistGeoMode('manual');
+        if (geoSourceSelect) {
+          geoSourceSelect.value = 'manual';
+        }
+      } else {
+        geoState.manualLock = false;
+      }
     }
 
     function persistTurboMode(enabled) {
@@ -4269,7 +4488,8 @@ HTML_PAGE = r"""<!doctype html>
     }
 
     function persistManualRegion(value) {
-      safeStorageSet(geoManualRegionKey, value || '');
+      const normalized = String(value || '').trim();
+      safeStorageSet(geoManualRegionKey, normalized);
     }
 
     function normalizeMode(value) {
@@ -5077,8 +5297,9 @@ HTML_PAGE = r"""<!doctype html>
     }
 
     async function applyManualLocation() {
-      const manual = (geoManualInput.value || '').trim();
+      const manual = (geoManualInput.value || locationInput.value || '').trim();
       geoState.manual = manual;
+      syncCurrentLocation(manual, 'geo');
       persistManualRegion(manual);
       geoState.mode = 'manual';
       geoState.manualLock = true;
@@ -5216,29 +5437,6 @@ HTML_PAGE = r"""<!doctype html>
         .replace(/'/g, '&#39;');
     }
 
-    function buildCloudVerificationPrompt(lastQuestion, localAnswer) {
-      const question = String(lastQuestion || '').trim();
-      const answer = String(localAnswer || '').trim();
-      if (!question || !answer) {
-        return '';
-      }
-      return [
-        '前回の質問とローカル回答をもとに、クラウドAIで再検証してください。',
-        '厳密に比較し、どこが妥当か・不足しているか・最終判断を簡潔に返してください。',
-        '',
-        '--- 前回の質問 ---',
-        question,
-        '',
-        '--- ローカル回答 ---',
-        answer,
-        '',
-        '--- 出力指示 ---',
-        '1. 重要な誤りがあれば指摘する',
-        '2. 追加で確認すべき点を3点以内で示す',
-        '3. 最終結論を1〜3文でまとめる',
-      ].join(String.fromCharCode(10));
-    }
-
     function linkifyText(text) {
       const escaped = escapeHtml(text);
       const urlPattern = new RegExp('(https?://[^\\\\s<]+)', 'g');
@@ -5268,43 +5466,6 @@ HTML_PAGE = r"""<!doctype html>
       el.className = `bubble ${role}`;
       const rawText = String(text || '');
       el.chatRawText = rawText;
-
-      if (role === 'assistant') {
-        const cloudButton = document.createElement('button');
-        cloudButton.type = 'button';
-        cloudButton.className = 'cloud-check-btn';
-        cloudButton.textContent = 'クラウドAIで再検証';
-        cloudButton.title = '前回の質問とローカル回答をクラウドAIに委託して再検証';
-        cloudButton.addEventListener('click', async () => {
-          const previousQuestion = chatLog.querySelector('.bubble.user:last-of-type')?.chatRawText || '';
-          const prompt = buildCloudVerificationPrompt(previousQuestion, rawText);
-          if (!prompt) {
-            cloudButton.disabled = true;
-            cloudButton.textContent = '比較対象なし';
-            return;
-          }
-          cloudButton.disabled = true;
-          cloudButton.textContent = '再検証中…';
-          try {
-            const result = await window.dashboardRequest({
-              message: prompt,
-              session_id: sessionInput.value.trim() || currentSessionId,
-              current_location: locationInput.value.trim(),
-              turbo_mode: turbomode.checked,
-              reply_style: window.aiSensory?.replyStyle() || 'standard',
-            });
-            const cloudBubble = addBubble('assistant', result.response || result.error || '再検証の結果が返ってきませんでした。');
-            cloudBubble.classList.add('cloud-verification-result');
-            cloudBubble.dataset.cloudVerification = 'true';
-            cloudButton.textContent = '再検証済み';
-            window.aiCore?.setState('cloud');
-          } catch (error) {
-            cloudButton.textContent = '再検証失敗';
-            addBubble('system', `クラウド再検証に失敗しました: ${error.message || error}`);
-          }
-        });
-        el.appendChild(cloudButton);
-      }
 
       const copyIconSvg = [
         '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">',
@@ -5374,12 +5535,13 @@ HTML_PAGE = r"""<!doctype html>
       const reductionRate = Number(evaluation.cloud_api_call_reduction_rate || evaluation.api_reduction_rate || 0).toFixed(1);
       runtimeRoute.textContent = route || '—';
       runtimeLatency.textContent = `${responseTime}秒`;
-      runtimeCloud.textContent = evaluation.api_called ? '使用あり' : '未使用';
+      runtimeCloud.textContent = evaluation.api_fee_status==='free'?'クラウド利用あり・料金なし':evaluation.api_called?'使用あり':'未使用';
       appendRuntimeLog(`route=${route} / ${responseTime}秒 / cloud=${evaluation.api_called ? 'on' : 'off'}`);
       const lines = [
         `処理経路：${route}`,
         `応答時間：${responseTime}秒`,
-        `API使用：${apiLabel}`,
+        evaluation.usage_assessment || `API使用：${apiLabel}`,
+        evaluation.cloud_model ? `使用モデル：${evaluation.cloud_provider} / ${evaluation.cloud_model}` : '',
         `今回の推定削減額：${savedCost}円`,
         `累計クラウドAPI呼出削減率：${reductionRate}％`,
       ];
@@ -5873,31 +6035,104 @@ HTML_PAGE = r"""<!doctype html>
       return 'https://duckduckgo.com/?q=' + encodeURIComponent(trimmed);
     }
 
+    function readBrowserHistory() {
+      try {
+        const raw = localStorage.getItem('jarvis-browser-history-v1');
+        const parsed = raw ? JSON.parse(raw) : [];
+        return Array.isArray(parsed) ? parsed : [];
+      } catch (error) {
+        return [];
+      }
+    }
+
+    function writeBrowserHistory(entries) {
+      try {
+        localStorage.setItem('jarvis-browser-history-v1', JSON.stringify(entries.slice(0, 12)));
+      } catch (error) {
+        // ブラウザー保存ができない場合はUIのみの履歴として扱う。
+      }
+    }
+
+    function renderBrowserHistory() {
+      const history = document.getElementById('browser-history');
+      if (!history) return;
+      const entries = readBrowserHistory();
+      history.innerHTML = '';
+      const title = document.createElement('div');
+      title.className = 'browser-history-title';
+      title.textContent = '検索履歴';
+      history.appendChild(title);
+      if (!entries.length) {
+        const empty = document.createElement('div');
+        empty.className = 'browser-history-empty';
+        empty.textContent = 'まだ検索していません。';
+        history.appendChild(empty);
+        return;
+      }
+      const list = document.createElement('div');
+      list.className = 'browser-history-list';
+      entries.forEach((entry) => {
+        const item = document.createElement('div');
+        item.className = 'browser-history-item';
+        const main = document.createElement('main');
+        const label = document.createElement('strong');
+        label.textContent = entry.label || entry.query || '検索';
+        const time = document.createElement('span');
+        time.textContent = entry.time || '履歴';
+        main.append(label, time);
+        const useButton = document.createElement('button');
+        useButton.type = 'button';
+        useButton.textContent = '再検索';
+        useButton.addEventListener('click', () => {
+          const input = document.getElementById('browser-search');
+          if (input) {
+            input.value = entry.query || entry.label || '';
+            input.focus();
+          }
+          openBrowserSearch();
+        });
+        item.append(main, useButton);
+        list.appendChild(item);
+      });
+      history.appendChild(list);
+    }
+
+    function saveBrowserHistory(query) {
+      const text = (query || '').trim();
+      if (!text) return;
+      const url = buildBrowserUrl(text);
+      const entries = readBrowserHistory();
+      const now = new Date();
+      const item = {
+        query: text,
+        label: text,
+        url,
+        time: now.toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' })
+      };
+      const deduped = entries.filter((entry) => entry.query !== text);
+      deduped.unshift(item);
+      writeBrowserHistory(deduped);
+      renderBrowserHistory();
+    }
+
     function openBrowserSearch() {
+      if (window.openSotukenBrowser) { window.openSotukenBrowser(); return; }
       const target = document.getElementById('browser-search');
       const value = (target ? target.value : '').trim();
       const query = value || 'local ai dashboard';
+      saveBrowserHistory(query);
       const url = buildBrowserUrl(query);
       const preview = document.querySelector('.browser-preview');
       if (!preview) return;
       preview.innerHTML = '';
 
-      const frame = document.createElement('iframe');
-      frame.title = 'ブラウザプレビュー';
-      frame.src = url;
-      frame.loading = 'lazy';
-      frame.referrerPolicy = 'strict-origin-when-cross-origin';
-      frame.sandbox = 'allow-scripts allow-forms allow-popups allow-same-origin allow-modals allow-downloads';
-      frame.setAttribute('allow', 'fullscreen');
-      preview.appendChild(frame);
-
-      const status = document.createElement('div');
-      status.className = 'browser-result';
-      status.textContent = `検索: ${query}`;
-      preview.appendChild(status);
-      if (typeof escapeHtml === 'function') {
-        status.textContent = `検索: ${query}`;
-      }
+      const link = document.createElement('a');
+      link.href = url;
+      link.target = '_blank';
+      link.rel = 'noopener noreferrer';
+      link.textContent = '検索結果を別タブで開く';
+      preview.appendChild(link);
+      link.click();
     }
 
     function setStatus(text) {
@@ -5908,22 +6143,22 @@ HTML_PAGE = r"""<!doctype html>
     function setMeta(meta) {
       const urls = getPathValue(meta, ['server', 'open_urls'], []);
       const localIp = getPathValue(meta, ['server', 'local_ip'], 'unknown');
-      const modelName = getPathValue(meta, ['local_llm', 'model'], 'unknown');
+      const modelName = getPathValue(meta,['routing','default_mode'],'')==='CLOUD_FIRST'?getPathValue(meta,['cloud','model'],'unknown'):getPathValue(meta,['local_llm','model'],'unknown');
       const firstUrl = urls[0] || `${window.location.origin}/`;
       const newline = String.fromCharCode(10);
       serverUrlChip.textContent = `url: ${firstUrl}`;
       serverIpChip.textContent = `ip: ${localIp}`;
       runtimeModel.textContent = modelName || '—';
-      metaCard.textContent = `PCのURL: ${firstUrl}` + newline + `ローカルIP: ${localIp}` + newline + `Ollama: ${modelName}` + newline;
+      metaCard.textContent = `PCのURL: ${firstUrl}` + newline + `ローカルIP: ${localIp}` + newline + `標準モデル: ${modelName}` + newline;
     }
 
     async function refreshHealth() {
       try {
         const res = await fetch('/health');
         const data = await res.json();
-        const modelName = getPathValue(data, ['ollama', 'model_configured'], data.model || 'unknown');
-        setStatus(`health: ${data.status} | model: ${modelName}`);
-        runtimeConnection.textContent = data.status || '—';
+        const modelName = data.routing_mode==='CLOUD_FIRST'?data.cloud?.model:getPathValue(data, ['ollama', 'model_configured'], data.model || 'unknown');
+        setStatus(data.routing_mode==='CLOUD_FIRST'?`クラウド標準 / APIキー${data.cloud?.configured?'設定済み（疎通未確認）':'未設定'} / ${modelName}`:`health: ${data.status} | model: ${modelName}`);
+        runtimeConnection.textContent = data.routing_mode==='CLOUD_FIRST'?(data.cloud?.configured?'API設定済み / 疎通未確認':'APIキー未設定'):(data.status||'—');
         runtimeModel.textContent = modelName || '—';
       } catch (e) {
         setStatus('health: offline');
@@ -5988,9 +6223,23 @@ HTML_PAGE = r"""<!doctype html>
       const button = document.createElement('button');button.type = 'button';button.className = 'chat-action';button.dataset.chatAction = 'true';button.textContent = label;button.disabled = isSending;button.addEventListener('click', () => { if (!isSending && !window.workbench?.busy()) action(); });
       bubble.append(button);return button;
     }
+    function addCloudDelegation(bubble, data, request) {
+      const offer = data.cloud_delegation;
+      if (!offer?.message) return;
+      const button = chatAction(bubble, 'クラウドに委託して回答を改善', () => {
+        if (button.dataset.cloudConsumed === 'true') return;
+        if (!confirm(offer.scope + '\nこの回答について一回だけ実行します。続けますか？')) return;
+        button.dataset.cloudConsumed = 'true'; button.disabled = true; button.textContent = 'クラウドへ委託済み';
+        sendMessage({message: offer.message, session_id: request.session_id,
+          reply_style: request.reply_style, operation_id: crypto.randomUUID(),
+          reuseQuestion: true, cloudDelegation: true});
+      });
+      button.dataset.cloudDelegate = 'true'; button.title = offer.scope;
+      const note = document.createElement('small');note.className = 'cloud-delegate-note';note.textContent = offer.scope + ' 承認は10分・一回限りです。';bubble.append(note);
+    }
     function setChatBusy(value) {
       chatStop.hidden = !value;
-      document.querySelectorAll('[data-chat-action]').forEach(button => button.disabled = value);
+      document.querySelectorAll('[data-chat-action]').forEach(button => button.disabled = value || button.dataset.cloudConsumed === 'true');
     }
 
     async function sendMessage(options = {}) {
@@ -6043,10 +6292,14 @@ HTML_PAGE = r"""<!doctype html>
       try {
         const data = await window.dashboardRequest(request);
         typing.remove();
+        if(data.model_switch_required)window.dispatchEvent(new CustomEvent('jarvis:free-models-exhausted',{detail:data}));
         if (data.ok) {
           const answer = addBubble('assistant', data.response);
+          if(data.evaluation?.usage_assessment){const badge=document.createElement('div');badge.className='chat-version-label';badge.textContent=data.evaluation.usage_assessment+(data.evaluation.cloud_model?' / '+data.evaluation.cloud_model:'');answer.prepend(badge);}
+          if(options.cloudDelegation){const badge=document.createElement('div');badge.className='chat-version-label';badge.textContent='選択したAIで生成した追加回答';answer.prepend(badge);}
           if(options.regenerate){const version=document.createElement('div');version.className='chat-version-label';version.textContent='再生成した回答（元の回答は保持）';answer.prepend(version);if(options.previousAnswer?.isConnected)options.previousAnswer.dataset.hasNewVersion='true';}
-          chatAction(answer, '再生成', () => sendMessage({...request, regenerate: true, regenerate_from: data.response, operation_id:crypto.randomUUID(), previousAnswer:answer, reuseQuestion: true}));
+          if(data.experiment_mode!=='CLOUD_FIRST'||!data.cloud_delegation)chatAction(answer, data.experiment_mode==='CLOUD_FIRST'?'クラウドで再生成':'再生成', () => sendMessage({...request, message:data.source_question||request.message, regenerate: true, regenerate_from: data.response, operation_id:crypto.randomUUID(), previousAnswer:answer, reuseQuestion: true}));
+          addCloudDelegation(answer, data, request);
           addFollowupPanel(data.followups);
           window.workbench.complete(data);
           if (window.workbench.succeeded(data)) window.aiCore.answer(data.response, data.evaluation);
@@ -6062,7 +6315,8 @@ HTML_PAGE = r"""<!doctype html>
           }
           await refreshDocuments();
         } else {
-          addBubble('assistant', data.error || 'error');
+          const failedAnswer = addBubble('assistant', data.error || 'error');
+          addCloudDelegation(failedAnswer, data, request);
           window.aiCore.setState('error');
           window.workbench.complete(data);
           showEvaluation(data.evaluation);
@@ -6101,6 +6355,14 @@ HTML_PAGE = r"""<!doctype html>
     documentClearBtn.addEventListener('click', clearDocumentSelection);
     geoFetchBtn.addEventListener('click', () => {
       requestDeviceLocation();
+    });
+    locationInput.addEventListener('input', () => {
+      const next = locationInput.value.trim();
+      syncCurrentLocation(next, 'chat');
+    });
+    geoManualInput.addEventListener('input', () => {
+      const next = geoManualInput.value.trim();
+      syncCurrentLocation(next, 'geo');
     });
     geoManualApplyBtn.addEventListener('click', () => {
       applyManualLocation();
@@ -6169,6 +6431,7 @@ HTML_PAGE = r"""<!doctype html>
     const browserSearchBtn = document.getElementById('browser-search-btn');
     const browserCloseBtn = document.getElementById('browser-close-btn');
     const chatBrowserModeBtn = document.getElementById('chat-browser-mode-btn');
+    renderBrowserHistory();
     if (browserToggleBtn) {
       browserToggleBtn.addEventListener('click', () => toggleBrowserPane());
     }
@@ -6231,7 +6494,7 @@ HTML_PAGE = r"""<!doctype html>
     initializeGeoMaps();
     attachGeoMapInteractions();
 
-    addBubble('system', 'local-only server ready');
+    addBubble('system', 'クラウド対話が標準です。対応する機能は自動でローカル処理します。クラウドには質問・会話履歴・関連する保存情報を送信します。回答後の作業要約も自動で生成します（追加API利用）。記憶ネットワークで停止・編集できます。');
     runtimeProcessing.textContent = '待機中';
     runtimeConnection.textContent = '—';
     runtimeRoute.textContent = '—';
@@ -6460,6 +6723,16 @@ class LocalAIServerHandler(BaseHTTPRequestHandler):
     except (OSError,RuntimeError):self._send_json({'ok':False,'error':'接続または保存に失敗しました。状態を再取得して確認してください。'},status=503)
 
   def do_GET(self) -> None:
+    if urlparse(self.path).path == '/site/dashboard/chat_browser.js':
+      from pathlib import Path
+      body = (Path(__file__).resolve().parent / 'site/dashboard/chat_browser.js').read_bytes()
+      self.send_response(200)
+      self.send_header('Content-Type', 'application/javascript; charset=utf-8')
+      self.send_header('Content-Length', str(len(body)))
+      self.send_header('Cache-Control', 'no-store')
+      self.end_headers()
+      self.wfile.write(body)
+      return
     parsed = urlparse(self.path)
     path = parsed.path
     query = parse_qs(parsed.query or "")
@@ -6510,7 +6783,7 @@ class LocalAIServerHandler(BaseHTTPRequestHandler):
       self._send_file(file_path)
       return
 
-    if path in {"/site/dashboard/dashboard.css", "/site/dashboard/dashboard.js", "/site/dashboard/chat_utilities.js", "/site/dashboard/workbench.js", "/site/dashboard/desktop.js", "/site/dashboard/maximalist.js", "/site/dashboard/details.js", "/site/dashboard/left_monitor.js", "/site/dashboard/left_monitor.css", "/site/dashboard/detail_sources.js", "/site/dashboard/operations.js", "/site/dashboard/sensory.js", "/site/dashboard/task_state.js", "/site/dashboard/taskdeck.js", "/site/dashboard/mission.js", "/site/dashboard/wake_voice.js", "/site/dashboard/spatial.js", "/site/dashboard/apple.js"}:
+    if path in {"/site/dashboard/model_picker.js", "/site/dashboard/model_picker.css", "/site/dashboard/api_usage.js", "/site/dashboard/api_usage.css", "/site/dashboard/work_memory_ui.js", "/site/dashboard/research.js", "/site/dashboard/research.css", "/site/dashboard/neural_core.js", "/site/dashboard/neural_core.css", "/site/dashboard/dashboard.css", "/site/dashboard/dashboard.js", "/site/dashboard/chat_utilities.js", "/site/dashboard/workbench.js", "/site/dashboard/desktop.js", "/site/dashboard/maximalist.js", "/site/dashboard/details.js", "/site/dashboard/left_monitor.js", "/site/dashboard/left_monitor.css", "/site/dashboard/detail_sources.js", "/site/dashboard/operations.js", "/site/dashboard/sensory.js", "/site/dashboard/task_state.js", "/site/dashboard/taskdeck.js", "/site/dashboard/mission.js", "/site/dashboard/wake_voice.js", "/site/dashboard/spatial.js", "/site/dashboard/apple.js"}:
       self._send_file(os.path.join(os.path.dirname(__file__), "site", "dashboard", path.rsplit("/", 1)[-1]))
       return
 
@@ -6526,8 +6799,8 @@ class LocalAIServerHandler(BaseHTTPRequestHandler):
 
     if path == "/system/metrics":
       try:
-        payload = system_monitor.snapshot()
-        self._send_json(payload, status=200 if payload.get("ok") else 503)
+        payload = system_monitor.latest()
+        self._send_json(payload, status=200 if payload.get("ok") else 202 if payload.get("warming_up") else 503)
       except (OSError, RuntimeError):
         self._send_json({"ok": False, "error": "PC情報を取得できませんでした。"}, status=503)
       return
@@ -6538,6 +6811,44 @@ class LocalAIServerHandler(BaseHTTPRequestHandler):
 
     if path == "/meta":
       self._send_json(_server_meta())
+      return
+
+    if path == '/cloud-models':
+      if not self._notification_guard(): return
+      session_id=str((query.get('session_id') or [''])[0])[:128]
+      self._send_json(model_catalog.snapshot(session_id))
+      return
+
+    if path == '/api-usage':
+      if not self._notification_guard(): return
+      try:
+        self._send_json(api_usage.snapshot(str((query.get('period') or ['month'])[0])))
+      except ValueError as exc:
+        self._send_json({'ok': False, 'error': str(exc)}, status=400)
+      return
+
+    if path == "/research/summary":
+      if not self._notification_guard():
+        return
+      from functions.research_report import build_report
+      try:
+        mode = str((query.get('mode') or [''])[0])
+        experiments_only = (query.get('experiments_only') or ['0'])[0] == '1'
+        self._send_json(build_report(evaluation_metrics.load_all(), mode, experiments_only))
+      except ValueError as exc:
+        self._send_json({'ok': False, 'error': str(exc)}, status=400)
+      return
+
+    if path == '/memory/work-summary':
+      if not self._notification_guard():
+        return
+      session_id=str((query.get('session_id') or [''])[0])[:128]
+      self._send_json(work_memory.status(session_id))
+      return
+
+    if path == "/memory/graph":
+      from functions.memory_graph import snapshot
+      self._send_json(snapshot())
       return
 
     if path == "/storage":
@@ -6641,6 +6952,87 @@ class LocalAIServerHandler(BaseHTTPRequestHandler):
 
   def do_POST(self) -> None:
     path = urlparse(self.path).path
+
+    if path == '/cloud-models':
+      if not self._notification_guard(write=True): return
+      try:
+        length=int(self.headers.get('Content-Length','0'))
+        if not 0<length<=3000:raise ValueError('入力が不正です。')
+        data=json.loads(self.rfile.read(length).decode('utf-8'))
+        if not isinstance(data,dict):raise ValueError('入力が不正です。')
+        session_id=str(data.get('session_id',''))[:128]
+        if data.get('action')=='key':model_catalog.save_key(data.get('provider'),data.get('key'),data.get('free_plan_confirmed',False))
+        elif data.get('action')=='select':model_catalog.choose(session_id,data.get('model_id'))
+        elif data.get('action')=='quota':
+          from cloud.free_pool import sync_openrouter
+          sync_openrouter()
+        else:raise ValueError('操作が不正です。')
+        self._send_json(model_catalog.snapshot(session_id))
+      except (OSError,ValueError,TypeError,UnicodeError):
+        self._send_json({'ok':False,'error':'モデル設定を保存できませんでした。入力を確認してください。'},status=400)
+      return
+
+    if path == '/api-usage/settings':
+      if not self._notification_guard(write=True): return
+      try:
+        length=int(self.headers.get('Content-Length','0'))
+        if not 0<length<=3000: raise ValueError('入力が不正です。')
+        data=json.loads(self.rfile.read(length).decode('utf-8'))
+        if not isinstance(data,dict): raise ValueError('入力が不正です。')
+        api_usage.update_settings(data)
+        self._send_json({'ok':True})
+      except (OSError, ValueError, TypeError, UnicodeError) as exc:
+        self._send_json({'ok':False,'error':'設定を保存できませんでした。数値を確認してください。'},status=400)
+      return
+
+    if path == '/memory/work-summary':
+      if not self._notification_guard(write=True):
+        return
+      try:
+        length=int(self.headers.get('Content-Length','0'))
+        if not 0<length<=3000:raise ValueError('入力が不正です。')
+        data=json.loads(self.rfile.read(length).decode('utf-8'))
+        if not isinstance(data,dict):raise ValueError('入力が不正です。')
+        session_id=str(data.get('session_id',''))[:128]
+        if data.get('action')=='set_enabled':work_memory.set_enabled(data.get('enabled'))
+        elif data.get('action')=='retry':work_memory.retry(session_id)
+        else:raise ValueError('操作が不正です。')
+        self._send_json(work_memory.status(session_id))
+      except (OSError,ValueError,TypeError,UnicodeError):
+        self._send_json({'ok':False,'error':'設定または要約を更新できませんでした。'},status=400)
+      return
+
+    if path == '/memory/graph':
+      if not self._notification_guard(write=True):
+        return
+      try:
+        length = int(self.headers.get('Content-Length', '0'))
+        if not 0 < length <= 40000:
+          raise ValueError('送信内容が長すぎます。')
+        data = json.loads(self.rfile.read(length).decode('utf-8'))
+        from functions.memory_graph import mutate
+        self._send_json(mutate(data))
+      except (ValueError, TypeError, UnicodeError) as exc:
+        self._send_json({'ok': False, 'error': str(exc)}, status=400)
+      return
+
+    if path == '/browser/launch':
+      if not self._notification_guard(write=True):
+        return
+      import subprocess
+      from pathlib import Path
+      folder = Path(__file__).resolve().parent / 'native' / 'ChatBrowser'
+      executable = folder / 'node_modules' / 'electron' / 'dist' / 'electron.exe'
+      if not executable.is_file():
+        self._send_json({'ok': False, 'error': '専用ブラウザが未導入です。native/ChatBrowserでnpm installを実行してください。'}, status=409)
+        return
+      env = os.environ.copy()
+      env.pop('ELECTRON_RUN_AS_NODE', None)
+      env['SOTUKEN_URL'] = f'http://127.0.0.1:{self.server.server_port}/'
+      subprocess.Popen([str(executable), str(folder)], cwd=str(folder), env=env,
+                       creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+      self._send_json({'ok': True})
+      return
 
     if path.startswith("/apple/"):
       self._apple_api(path,write=True)
@@ -6851,6 +7243,9 @@ class QuietThreadingHTTPServer(ThreadingHTTPServer):
 
 
 def run_server(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> None:
+    from functions.embedded_browser import start_service
+    start_service(f'http://localhost:{port}')
+    start_service(f'http://127.0.0.1:{port}')
     server = QuietThreadingHTTPServer((host, port), LocalAIServerHandler)
     print(f"Local AI server running on http://{host}:{port}")
     print(f"Open the UI on the PC or from your smartphone on the same network.")

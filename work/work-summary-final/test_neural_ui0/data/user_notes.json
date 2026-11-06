@@ -1,0 +1,15 @@
+{
+  "notes": [
+    {
+      "title": "卒研 音声操作",
+      "content": "音声入力と停止機能を改善する",
+      "updated_at": "2026-11-06T13:41:30",
+      "type": "goal",
+      "priority": "medium",
+      "status": "active",
+      "due_date": "",
+      "tasks": []
+    }
+  ],
+  "updated_at": "2026-11-06T13:41:32"
+}

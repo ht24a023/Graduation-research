@@ -1,0 +1,27 @@
+{
+  "profile": {
+    "name": "",
+    "location": "",
+    "likes": [],
+    "dislikes": [],
+    "facts": [],
+    "updated_at": "2026-11-06T13:12:42"
+  },
+  "notes": [
+    {
+      "title": "卒研 音声入力",
+      "content": "更新された実験結果",
+      "updated_at": "2026-11-06T13:12:42",
+      "type": "goal",
+      "priority": "medium",
+      "status": "active",
+      "due_date": "",
+      "tasks": []
+    }
+  ],
+  "keep_requests": [],
+  "profile_updated_at": "2026-11-06T13:12:42",
+  "notes_updated_at": "2026-11-06T13:12:42",
+  "keep_requests_updated_at": "2026-11-06T13:12:42",
+  "synced_at": "2026-11-06T13:12:42"
+}

@@ -1,0 +1,39 @@
+{
+  "profile": {
+    "name": "",
+    "location": "",
+    "likes": [],
+    "dislikes": [],
+    "facts": [],
+    "updated_at": "2026-11-06T14:13:03"
+  },
+  "notes": [
+    {
+      "title": "作業要約 [262121c5372b]",
+      "content": "利用者の確定した修正",
+      "type": "note",
+      "source": "cloud_work_summary",
+      "work_session_key": "262121c5372b",
+      "summary_revision": 1,
+      "user_edited": true,
+      "updated_at": "2026-11-06T14:13:03",
+      "summary_proposal": false
+    },
+    {
+      "title": "作業要約の更新案 [262121c5372b]",
+      "content": "【目的】\n卒業研究の作業内容を整理する\n\n【決まったこと】\n・クラウドを標準にする\n\n【進捗（会話での報告）】\n・計算機能の確認について会話した。実機検証は未確認。\n\n【未解決・未確認】\n・回答品質の評価は未実施\n\n【次の作業（未実施）】\n・実験を行う（未実施）",
+      "type": "note",
+      "source": "cloud_work_summary",
+      "work_session_key": "262121c5372b",
+      "summary_revision": 1,
+      "user_edited": false,
+      "updated_at": "2026-11-06T14:13:03",
+      "summary_proposal": true
+    }
+  ],
+  "keep_requests": [],
+  "profile_updated_at": "2026-11-06T14:13:03",
+  "notes_updated_at": "2026-11-06T14:13:03",
+  "keep_requests_updated_at": "2026-11-06T14:13:03",
+  "synced_at": "2026-11-06T14:13:03"
+}

@@ -1,0 +1,27 @@
+{
+  "profile": {
+    "name": "",
+    "location": "",
+    "likes": [],
+    "dislikes": [],
+    "facts": [],
+    "updated_at": "2026-11-06T12:22:50"
+  },
+  "notes": [
+    {
+      "title": "卒研の検証コード",
+      "content": "The verification code is SOTU-1106. This is synthetic test data.",
+      "updated_at": "2026-11-06T12:22:50",
+      "type": "goal",
+      "priority": "medium",
+      "status": "active",
+      "due_date": "",
+      "tasks": []
+    }
+  ],
+  "keep_requests": [],
+  "profile_updated_at": "2026-11-06T12:22:50",
+  "notes_updated_at": "2026-11-06T12:22:50",
+  "keep_requests_updated_at": "2026-11-06T12:22:50",
+  "synced_at": "2026-11-06T12:22:50"
+}

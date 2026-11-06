@@ -1,0 +1,16 @@
+{
+  "notes": [
+    {
+      "title": "作業要約 [4aa3ad11f0ed]",
+      "content": "【目的】\n卒業研究の作業内容を整理する\n\n【決まったこと】\n・クラウドを標準にする\n\n【進捗（会話での報告）】\n・計算機能の確認について会話した。実機検証は未確認。\n\n【未解決・未確認】\n・回答品質の評価は未実施\n\n【次の作業（未実施）】\n・実験を行う（未実施）",
+      "type": "note",
+      "source": "cloud_work_summary",
+      "work_session_key": "4aa3ad11f0ed",
+      "summary_revision": 1,
+      "user_edited": false,
+      "updated_at": "2026-11-06T14:24:04",
+      "summary_proposal": false
+    }
+  ],
+  "updated_at": "2026-11-06T14:24:04"
+}

@@ -1,0 +1,22 @@
+{
+  "notes": [
+    {
+      "title": "卒研の音声入力",
+      "content": "停止操作は確認済み。精度は未測定。",
+      "updated_at": "2026-11-06T13:38:37",
+      "type": "goal",
+      "priority": "medium",
+      "status": "active",
+      "due_date": "",
+      "tasks": [
+        {
+          "title": "卒研の音声入力を改善したい",
+          "priority": "medium",
+          "status": "pending",
+          "due_date": ""
+        }
+      ]
+    }
+  ],
+  "updated_at": "2026-11-06T13:38:37"
+}

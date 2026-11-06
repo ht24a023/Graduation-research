@@ -1,0 +1,12 @@
+from pathlib import Path
+p=Path('site/dashboard/neural_core.js');s=p.read_text(encoding='utf-8');s=s.replace('let contextRefs=[],contextCached=false,coreVisible=true;', 'let contextRefs=[],contextCached=false,coreVisible=true,editorDirty=false;')
+s=s.replace('function select(n){selected=n;', "function select(n,force=false){if(editorDirty&&!force&&!confirm('編集中の内容を破棄して別の記憶を表示しますか？'))return;editorDirty=false;selected=n;",1)
+s=s.replace("meta.textContent=n?`${n.source} / ${n.updated_at||'日時不明'}`", "meta.textContent=n?`${n.source}${n.user_edited?' / ユーザー編集済み':''} / ${n.updated_at||'日時不明'}`",1)
+s=s.replace("graph=data;status.textContent=", "if(payload)editorDirty=false;graph=data;status.textContent=",1)
+s=s.replace('if(selected)select(graph.nodes.find(n=>n.id===selected.id)||null);', 'if(selected&&!editorDirty)select(graph.nodes.find(n=>n.id===selected.id)||null,true);',1)
+s=s.replace("renderContext();close.onclick=()=>dialog.close();", "renderContext();title.addEventListener('input',()=>editorDirty=true);content.addEventListener('input',()=>editorDirty=true);close.onclick=()=>{if(!editorDirty||confirm('編集中の内容を保存せずに閉じますか？'))dialog.close();};dialog.addEventListener('cancel',event=>{if(editorDirty&&!confirm('編集中の内容を保存せずに閉じますか？'))event.preventDefault();});",1)
+s=s.replace("requestAnimationFrame(tick);select(null);", "requestAnimationFrame(tick);select(null);window.memoryNetwork={open:showMemory,refresh:()=>load(),isDirty:()=>editorDirty};",1)
+p.write_text(s,encoding='utf-8')
+p=Path('local_ai_server.py');s=p.read_text(encoding='utf-8');s=s.replace('  <script src="/site/dashboard/neural_core.js"></script>', '  <script src="/site/dashboard/neural_core.js"></script>\n  <script src="/site/dashboard/work_memory_ui.js"></script>',1)
+s=s.replace('if path in {"/site/dashboard/research.js",', 'if path in {"/site/dashboard/work_memory_ui.js", "/site/dashboard/research.js",',1)
+p.write_text(s,encoding='utf-8')

@@ -1,0 +1,9 @@
+{
+  "monthly_budget_usd": 10.0,
+  "usd_jpy": null,
+  "balance_reference": {
+    "amount_usd": 5.0,
+    "recorded_at": 1793942893.5811565,
+    "baseline_cost_usd": 0.0005
+  }
+}

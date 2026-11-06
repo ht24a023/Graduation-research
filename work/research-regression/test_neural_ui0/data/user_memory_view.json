@@ -1,0 +1,27 @@
+{
+  "profile": {
+    "name": "",
+    "location": "",
+    "likes": [],
+    "dislikes": [],
+    "facts": [],
+    "updated_at": "2026-11-06T12:19:13"
+  },
+  "notes": [
+    {
+      "title": "卒研 音声操作",
+      "content": "音声入力と停止機能を改善する",
+      "updated_at": "2026-11-06T12:19:18",
+      "type": "goal",
+      "priority": "medium",
+      "status": "active",
+      "due_date": "",
+      "tasks": []
+    }
+  ],
+  "keep_requests": [],
+  "profile_updated_at": "2026-11-06T12:19:13",
+  "notes_updated_at": "2026-11-06T12:19:21",
+  "keep_requests_updated_at": "2026-11-06T12:19:13",
+  "synced_at": "2026-11-06T12:19:21"
+}

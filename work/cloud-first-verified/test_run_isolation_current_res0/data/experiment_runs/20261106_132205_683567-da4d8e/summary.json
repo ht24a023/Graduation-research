@@ -1,0 +1,138 @@
+{
+  "run_id": "20261106_132205_683567-da4d8e",
+  "protocol": {
+    "modes": [
+      "LOCAL_ONLY",
+      "DYNAMIC_ROUTING"
+    ],
+    "repetitions": 2,
+    "questions": 2,
+    "planned_requests": 8,
+    "cloud_mode_explicitly_enabled": false,
+    "session_policy": "Separate session per run, mode and repetition; question order retained within each session."
+  },
+  "environment": {
+    "ok": true
+  },
+  "total_requests": 8,
+  "success_requests": 4,
+  "missing_evaluation_count": 4,
+  "result_jsonl": "data\\experiment_runs\\20261106_132205_683567-da4d8e\\experiment_result.jsonl",
+  "evaluation_csv": "data\\experiment_runs\\20261106_132205_683567-da4d8e\\evaluation_log.csv",
+  "summary": {
+    "ok": true,
+    "generated_at": "2026-11-06T13:22:05+09:00",
+    "filters": {
+      "mode": "",
+      "experiments_only": false
+    },
+    "overall": {
+      "count": 4,
+      "completed": 4,
+      "completion_rate": 100.0,
+      "measured": 4,
+      "mean_sec": 1.0,
+      "median_sec": 1.0,
+      "p95_sec": 1.0,
+      "cloud_count": 0,
+      "api_known": 4,
+      "cloud_avoidance_rate": 100.0,
+      "rated": 0,
+      "unrated": 4,
+      "good": 0,
+      "partial": 0,
+      "bad": 0,
+      "good_rate_among_rated": null
+    },
+    "modes": [
+      {
+        "mode": "CLOUD_FIRST",
+        "count": 0,
+        "completed": 0,
+        "completion_rate": null,
+        "measured": 0,
+        "mean_sec": null,
+        "median_sec": null,
+        "p95_sec": null,
+        "cloud_count": 0,
+        "api_known": 0,
+        "cloud_avoidance_rate": null,
+        "rated": 0,
+        "unrated": 0,
+        "good": 0,
+        "partial": 0,
+        "bad": 0,
+        "good_rate_among_rated": null
+      },
+      {
+        "mode": "LOCAL_ONLY",
+        "count": 2,
+        "completed": 2,
+        "completion_rate": 100.0,
+        "measured": 2,
+        "mean_sec": 1.0,
+        "median_sec": 1.0,
+        "p95_sec": 1.0,
+        "cloud_count": 0,
+        "api_known": 2,
+        "cloud_avoidance_rate": 100.0,
+        "rated": 0,
+        "unrated": 2,
+        "good": 0,
+        "partial": 0,
+        "bad": 0,
+        "good_rate_among_rated": null
+      },
+      {
+        "mode": "FIXED_ROUTING",
+        "count": 0,
+        "completed": 0,
+        "completion_rate": null,
+        "measured": 0,
+        "mean_sec": null,
+        "median_sec": null,
+        "p95_sec": null,
+        "cloud_count": 0,
+        "api_known": 0,
+        "cloud_avoidance_rate": null,
+        "rated": 0,
+        "unrated": 0,
+        "good": 0,
+        "partial": 0,
+        "bad": 0,
+        "good_rate_among_rated": null
+      },
+      {
+        "mode": "DYNAMIC_ROUTING",
+        "count": 2,
+        "completed": 2,
+        "completion_rate": 100.0,
+        "measured": 2,
+        "mean_sec": 1.0,
+        "median_sec": 1.0,
+        "p95_sec": 1.0,
+        "cloud_count": 0,
+        "api_known": 2,
+        "cloud_avoidance_rate": 100.0,
+        "rated": 0,
+        "unrated": 2,
+        "good": 0,
+        "partial": 0,
+        "bad": 0,
+        "good_rate_among_rated": null
+      }
+    ],
+    "unknown_mode_count": 0,
+    "paired_case_count": 0,
+    "definitions": {
+      "completion": "ログのsuccessがtrueの割合。回答の正しさとは異なります。",
+      "quality": "good / partial / badの人手評価。未評価を合格に含めません。",
+      "latency": "サーバー処理時間。P95は昇順データのceil(n×0.95)番目。",
+      "cloud": "クラウドLLMの利用。検索・天気などの外部通信は含みません。",
+      "comparison": "3モード共通のtest_case_id件数を表示。件数一致だけでは条件・品質の公平性を保証しません。",
+      "cost": "料金とトークンの実測値は収集していないため、このレポートでは費用削減率を算出しません。"
+    },
+    "privacy": "入力文・回答文・評価コメント・記憶本文は含みません。集計値のみです。"
+  },
+  "quality_status": "Human evaluation not performed by this runner. ok means processing completion, not answer correctness."
+}

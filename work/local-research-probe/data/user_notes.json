@@ -1,0 +1,15 @@
+{
+  "notes": [
+    {
+      "title": "卒研の検証コード",
+      "content": "The verification code is SOTU-1106. This is synthetic test data.",
+      "updated_at": "2026-11-06T12:22:50",
+      "type": "goal",
+      "priority": "medium",
+      "status": "active",
+      "due_date": "",
+      "tasks": []
+    }
+  ],
+  "updated_at": "2026-11-06T12:22:50"
+}

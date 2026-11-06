@@ -1,0 +1,3 @@
+﻿run_id,mode,repetition,test_case_id,ok,response_time_sec,local_time_sec,cloud_time_sec,api_called,request_id
+20261106_133858_206125-25579c,LOCAL_ONLY,1,one,True,1,,,False,probe
+20261106_133858_206125-25579c,LOCAL_ONLY,1,two,False,,,,,

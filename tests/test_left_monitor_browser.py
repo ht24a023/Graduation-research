@@ -101,7 +101,7 @@ def test_left_history_memory_plateau_and_process_cpu_formula(ui):
     last=page.evaluate(async_script,{'sample':sample,'count':1200,'offset':400});cdp.send('HeapProfiler.collectGarbage');heap_last=cdp.send('Runtime.getHeapUsage')['usedSize']
     assert first['sample_count']==last['sample_count']==240
     assert max(last['plot_nodes'])<=3
-    assert abs(last['backend_cpu_percent']-20)<.001
+    assert abs(last['backend_cpu_percent']-20/max(1,sample['cpu']['logical_cores']))<.001
     assert heap_last-heap_first<12*1024*1024
     # An unavailable volume must not show an invented 0% bar.
     page.evaluate("sample=>{sample.sampled_at+=10000;sample.storage={volumes:[{device:'X:',available:false,usage_percent:null,total_bytes:null,free_bytes:null}]};window.dispatchEvent(new CustomEvent('jarvis:system-metrics',{detail:sample}));}",sample)

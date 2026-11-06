@@ -29,6 +29,9 @@ data/documents_db.txt
 .DS_Store
 Thumbs.db
 .vscode/
+native/ChatBrowser/node_modules/
+native/ChatBrowser/profile/
+native/ChatBrowser/.npm-cache/
 data/processing_log.jsonl
 
 # Native notification bridge build and per-run local connection secret

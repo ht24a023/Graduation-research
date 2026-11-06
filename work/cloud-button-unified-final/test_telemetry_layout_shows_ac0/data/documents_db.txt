@@ -1,0 +1,2 @@
+# documents_db (tab-separated)
+# doc_id	created_at	updated_at	status	title	file_path	chars	checksum

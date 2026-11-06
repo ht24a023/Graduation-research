@@ -25,8 +25,8 @@ def test_process_summary_is_sorted_bounded_cached_and_excludes_sensitive_fields(
     with patch('functions.system_monitor.psutil.process_iter', return_value=processes) as scan:
         first = monitor._process_snapshot(100)
         assert [row['pid'] for row in first] == [9, 8, 7, 6, 5, 4]
-        assert all(set(row) == {'pid', 'name', 'rss_bytes', 'threads'} for row in first)
-        assert monitor._process_snapshot(110) is first
+        assert all(set(row) == {'pid', 'name', 'rss_bytes', 'threads', 'cpu_percent'} for row in first)
+        assert monitor._process_snapshot(101) is first
         assert scan.call_count == 1
         monitor._process_snapshot(116)
         assert scan.call_count == 2
@@ -60,7 +60,7 @@ def test_missing_optional_network_and_disk_counters_are_unknown():
 
 
 def test_unavailable_process_count_is_not_claimed_as_zero():
-    with patch('functions.system_monitor.psutil.pids', side_effect=OSError('unavailable')):
+    with patch('functions.windows_performance.system_counts', return_value={}), patch('functions.system_monitor.psutil.pids', side_effect=OSError('unavailable')):
         data = SystemMonitor().snapshot()
     assert data['process']['system_process_count'] is None
 

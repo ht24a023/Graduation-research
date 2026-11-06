@@ -30,7 +30,7 @@ def test_regeneration_never_dispatches_original_tool(tmp_path, monkeypatch):
     with patch.object(server, 'ask_local_llm', return_value='取得済みの数値を使った別の回答です。') as llm, \
          patch.object(server, '_dispatch_dashboard_tool') as tool:
         result = server._build_chat_payload('CPUの使用率を教えて', 'regen-test',
-                    regenerate=True, regenerate_from='CPU使用率は20%でした。')
+                    experiment_mode='LOCAL_ONLY', regenerate=True, regenerate_from='CPU使用率は20%でした。')
     assert result['ok'] and result['regenerated']
     tool.assert_not_called()
     assert '20%' in llm.call_args.args[0]

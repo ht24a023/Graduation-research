@@ -1,0 +1,39 @@
+{
+  "profile": {
+    "name": "",
+    "location": "",
+    "likes": [],
+    "dislikes": [],
+    "facts": [],
+    "updated_at": "2026-11-06T14:10:20"
+  },
+  "notes": [
+    {
+      "title": "作業要約 [fef20d0927b1]",
+      "content": "【目的】\n卒業研究の作業内容を整理する\n\n【決まったこと】\n・クラウドを標準にする\n\n【進捗（会話での報告）】\n・計算機能の確認について会話した。実機検証は未確認。\n\n【未解決・未確認】\n・回答品質の評価は未実施\n\n【次の作業（未実施）】\n・実験を行う（未実施）",
+      "type": "note",
+      "source": "cloud_work_summary",
+      "work_session_key": "fef20d0927b1",
+      "summary_revision": 1,
+      "user_edited": false,
+      "updated_at": "2026-11-06T14:10:20",
+      "summary_proposal": false
+    },
+    {
+      "title": "作業要約 [4c86705c0865]",
+      "content": "【目的】\n卒業研究の作業内容を整理する\n\n【決まったこと】\n・クラウドを標準にする\n\n【進捗（会話での報告）】\n・計算機能の確認について会話した。実機検証は未確認。\n\n【未解決・未確認】\n・回答品質の評価は未実施\n\n【次の作業（未実施）】\n・実験を行う（未実施）",
+      "type": "note",
+      "source": "cloud_work_summary",
+      "work_session_key": "4c86705c0865",
+      "summary_revision": 1,
+      "user_edited": false,
+      "updated_at": "2026-11-06T14:10:20",
+      "summary_proposal": false
+    }
+  ],
+  "keep_requests": [],
+  "profile_updated_at": "2026-11-06T14:10:20",
+  "notes_updated_at": "2026-11-06T14:10:20",
+  "keep_requests_updated_at": "2026-11-06T14:10:20",
+  "synced_at": "2026-11-06T14:10:20"
+}

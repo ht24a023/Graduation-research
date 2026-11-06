@@ -1,0 +1,28 @@
+{
+  "profile": {
+    "name": "",
+    "location": "",
+    "likes": [],
+    "dislikes": [],
+    "facts": [],
+    "updated_at": "2026-11-06T13:37:06"
+  },
+  "notes": [
+    {
+      "title": "作業要約の更新案 [129ce5]",
+      "content": "【目的】\n卒業研究の作業内容を整理する\n\n【決まったこと】\n・クラウドを標準にする\n\n【進捗（会話での報告）】\n・計算機能の確認について会話した。実機検証は未確認。\n\n【未解決・未確認】\n・回答品質の評価は未実施\n\n【次の作業（未実施）】\n・実験を行う（未実施）",
+      "type": "note",
+      "source": "cloud_work_summary",
+      "work_session_key": "129ce50dd90b",
+      "summary_revision": 1,
+      "user_edited": false,
+      "updated_at": "2026-11-06T13:37:06",
+      "summary_proposal": true
+    }
+  ],
+  "keep_requests": [],
+  "profile_updated_at": "2026-11-06T13:37:06",
+  "notes_updated_at": "2026-11-06T13:37:06",
+  "keep_requests_updated_at": "2026-11-06T13:37:06",
+  "synced_at": "2026-11-06T13:37:06"
+}

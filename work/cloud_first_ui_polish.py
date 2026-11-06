@@ -1,0 +1,6 @@
+from pathlib import Path
+p=Path('local_ai_server.py');s=p.read_text(encoding='utf-8');s=s.replace('return finalize(ok=True, route="cloud_fallback", response=cloud_response)', 'return finalize(ok=True, route="cloud_fallback", response=cloud_response, extra={"source_question":pending.get("message", "")})',1)
+s=s.replace("          chatAction(answer, data.experiment_mode==='CLOUD_FIRST'?'クラウドで再生成':'再生成', () => sendMessage({...request, regenerate: true,", "          if(data.experiment_mode!=='CLOUD_FIRST'||!data.cloud_delegation)chatAction(answer, data.experiment_mode==='CLOUD_FIRST'?'クラウドで再生成':'再生成', () => sendMessage({...request, message:data.source_question||request.message, regenerate: true,",1)
+s=s.replace("        runtimeConnection.textContent = data.status || '—';", "        runtimeConnection.textContent = data.routing_mode==='CLOUD_FIRST'?(data.cloud?.configured?'API設定済み / 疎通未確認':'APIキー未設定'):(data.status||'—');",1)
+p.write_text(s,encoding='utf-8')
+p=Path('tests/test_cloud_first_browser.py');s=p.read_text(encoding='utf-8');s=s.replace("button=local.locator('[data-cloud-delegate]');assert button.count()==1", "button=local.locator('[data-cloud-delegate]');assert button.count()==1\n            assert local.get_by_role('button',name='クラウドで再生成',exact=True).count()==0",1);p.write_text(s,encoding='utf-8')

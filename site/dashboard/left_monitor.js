@@ -14,7 +14,7 @@
   const p=data.process||{};const counters=p.cpu_time_seconds;const current=finite(counters?.user)&&finite(counters?.system)?counters.user+counters.system:null;
   if(!previous||previous.stamp!==data.sampled_at){
    const elapsed=previous&&finite(p.server_uptime_sec)&&finite(previous.uptime)?p.server_uptime_sec-previous.uptime:null;
-   processCPU=previous&&p.pid===previous.pid&&finite(current)&&finite(previous.total)&&current>=previous.total&&finite(elapsed)&&elapsed>0?(current-previous.total)/elapsed*100:null;
+   processCPU=previous&&p.pid===previous.pid&&finite(current)&&finite(previous.total)&&current>=previous.total&&finite(elapsed)&&elapsed>0?Math.max(0,Math.min(100,(current-previous.total)/elapsed/Math.max(1,data.cpu.logical_cores||1)*100)):null;
    previous={pid:p.pid,uptime:p.server_uptime_sec,total:current,stamp:data.sampled_at,interval:elapsed};
    history.push({sampled_at:data.sampled_at,cpu:data.cpu.usage_percent,rx:data.network.receive_bytes_sec,tx:data.network.send_bytes_sec,backend_cpu:processCPU,per_core:Array.isArray(data.cpu.per_core_percent)?data.cpu.per_core_percent.slice(0,512):[]});
    if(history.length>MAX)history.splice(0,history.length-MAX);
@@ -81,6 +81,7 @@
  }
  function init(){if(booted||!build())return;booted=true;render();interval=setInterval(()=>{if(!document.hidden)health();},1000);window.addEventListener('pagehide',()=>clearInterval(interval));window.addEventListener('pageshow',event=>{if(event.persisted){clearInterval(interval);health();interval=setInterval(()=>{if(!document.hidden)health();},1000);}});}
  window.addEventListener('jarvis:system-metrics',event=>ingest(event.detail));
+ window.addEventListener('jarvis:telemetry-error',event=>{failed=true;errorText=event.detail?.error||'取得失敗';health();});
  window.leftMonitorAudit={inspect:()=>({sample_count:history.length,max_samples:MAX,last_success:lastSuccess,status:failed?'error':!lastSuccess?'missing':performance.now()-receivedAt>STALE?'stale':'live',backend_cpu_percent:processCPU,backend_cpu_interval_sec:previous?.interval??null,backend_pid:latest?.process?.pid??null,plot_nodes:['left-cpu-history','hud-network-plot','hud-network-tx-plot'].map(id=>$(id)?.querySelectorAll('*').length||0)}),details:()=>getDetail({})};
  if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init,{once:true});else init();
 })();

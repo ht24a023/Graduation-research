@@ -1,0 +1,3 @@
+# documents_db (tab-separated)
+# doc_id	created_at	updated_at	status	title	file_path	chars	checksum
+DOC000001	2026-11-06T12:22:01	2026-11-06T12:22:01	active	実験記録	data/documents/DOC000001_20261106_122201.txt	29	c81425e3aa64ffb0d8d3ad49ad93759e8e9d8a9f

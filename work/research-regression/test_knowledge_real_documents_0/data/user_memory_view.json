@@ -1,0 +1,28 @@
+{
+  "profile": {
+    "name": "",
+    "location": "",
+    "likes": [],
+    "dislikes": [],
+    "facts": [],
+    "updated_at": "2026-11-06T12:22:01"
+  },
+  "notes": [],
+  "keep_requests": [
+    {
+      "type": "document",
+      "doc_id": "DOC000001",
+      "title": "実験記録",
+      "file_path": "data/documents/DOC000001_20261106_122201.txt",
+      "chars": 29,
+      "checksum": "c81425e3aa64ffb0d8d3ad49ad93759e8e9d8a9f",
+      "preview": "ローカル推論の応答時間は実測する。 CPU負荷も記録する。",
+      "source": "利用者が選択したテキストファイル",
+      "saved_at": "2026-11-06T12:22:01"
+    }
+  ],
+  "profile_updated_at": "2026-11-06T12:22:01",
+  "notes_updated_at": "2026-11-06T12:22:01",
+  "keep_requests_updated_at": "2026-11-06T12:22:01",
+  "synced_at": "2026-11-06T12:22:01"
+}

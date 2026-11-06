@@ -1,0 +1,6 @@
+from pathlib import Path
+p=Path('tests/test_cloud_first_browser.py');s=p.read_text(encoding='utf-8');s=s.replace("local=page.locator('#chat-log .bubble.assistant').last", "local=page.locator('#chat-log .bubble.assistant').nth(1)");p.write_text(s,encoding='utf-8')
+p=Path('tests/test_chat_transport_cancel.py');s=p.read_text(encoding='utf-8');s=s.replace('from cloud import local_llm, openai_client', 'from openai import AsyncOpenAI as LoopbackAsyncOpenAI\nfrom cloud import local_llm, openai_client',1);s=s.replace('real_async_client = openai_client.AsyncOpenAI','real_async_client = LoopbackAsyncOpenAI  # This test always sets base_url to its loopback peer.');p.write_text(s,encoding='utf-8')
+p=Path('functions/routing_policy.py');s=p.read_text(encoding='utf-8');s=s.replace('説明|改善案|使い方', '説明|改善|使い方|目安|適正|原因|対策|下げたい|減らしたい',1);s=s.replace("(?:今日|現在)(?:の)?(?:日付|何日)", "(?:今日|現在)(?:の|は)?(?:日付|何日)",1)
+s=s.replace("if not explanatory and re.search(r'天気|気温|降水確率',text) and re.search(r'教えて|調べて|予報|ですか|は[？?]?$',text):", "if not explanatory and re.search(r'天気|気温|降水確率',text) and (re.search(r'教えて|調べて|予報|ですか|は[？?]?$',text) or re.fullmatch(r'.{0,30}(?:の天気|の気温|天気予報)[？?。\\s]*',text)):")
+p.write_text(s,encoding='utf-8')

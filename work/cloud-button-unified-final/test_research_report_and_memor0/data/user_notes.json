@@ -1,0 +1,15 @@
+{
+  "notes": [
+    {
+      "title": "音声入力の実験",
+      "content": "停止操作を確認した。応答速度は未測定。",
+      "updated_at": "2026-11-06T12:59:33",
+      "type": "goal",
+      "priority": "medium",
+      "status": "active",
+      "due_date": "",
+      "tasks": []
+    }
+  ],
+  "updated_at": "2026-11-06T12:59:33"
+}

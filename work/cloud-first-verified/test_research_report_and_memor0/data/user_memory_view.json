@@ -1,0 +1,27 @@
+{
+  "profile": {
+    "name": "",
+    "location": "",
+    "likes": [],
+    "dislikes": [],
+    "facts": [],
+    "updated_at": "2026-11-06T13:21:35"
+  },
+  "notes": [
+    {
+      "title": "音声入力の実験",
+      "content": "停止操作を確認した。応答速度は未測定。",
+      "updated_at": "2026-11-06T13:21:31",
+      "type": "goal",
+      "priority": "medium",
+      "status": "active",
+      "due_date": "",
+      "tasks": []
+    }
+  ],
+  "keep_requests": [],
+  "profile_updated_at": "2026-11-06T13:21:35",
+  "notes_updated_at": "2026-11-06T13:21:31",
+  "keep_requests_updated_at": "2026-11-06T13:21:35",
+  "synced_at": "2026-11-06T13:21:35"
+}

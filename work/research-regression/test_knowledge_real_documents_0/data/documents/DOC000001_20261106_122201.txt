@@ -1,0 +1,10 @@
+# Document ID: DOC000001
+# Title: 実験記録
+# Created At: 2026-11-06T12:22:01
+# Updated At: 2026-11-06T12:22:01
+# Status: active
+# Checksum: c81425e3aa64ffb0d8d3ad49ad93759e8e9d8a9f
+
+----- BODY -----
+ローカル推論の応答時間は実測する。
+CPU負荷も記録する。

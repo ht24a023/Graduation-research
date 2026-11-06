@@ -1,0 +1,12 @@
+{
+  "kind": "real_local_model_probe",
+  "model": "llama3",
+  "cloud_called": false,
+  "selected_titles": [
+    "卒研の検証コード"
+  ],
+  "response": "SOTU-1106",
+  "expected_code_found": true,
+  "elapsed_sec": 35.214,
+  "limitations": "One synthetic recall probe; not a general accuracy or performance evaluation."
+}
